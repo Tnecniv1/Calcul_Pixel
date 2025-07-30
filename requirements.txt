@@ -1,0 +1,6 @@
+streamlit
+openai
+Pillow
+numpy
+python-dotenv
+supabase
