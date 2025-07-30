@@ -7,10 +7,13 @@ from openai import OpenAI
 from dotenv import load_dotenv
 from datetime import datetime
 from supabase import create_client
-import config
 
 # --- Connexion Supabase ---
 supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+supabase_url = st.secrets["SUPABASE_URL"]
+supabase_key = st.secrets["SUPABASE_KEY"]
+supabase = create_client(supabase_url, supabase_key)
+
 
 # --- OpenAI ---
 load_dotenv()
@@ -22,6 +25,72 @@ if "page" not in st.session_state:
 
 
 # --------------------- UTILISATEURS ---------------------
+
+def login_page():
+    st.title("Connexion")
+
+    email = st.text_input("Adresse email")
+    password = st.text_input("Mot de passe", type="password")
+
+    if st.button("Se connecter"):
+        # Vérifie les identifiants avec Supabase
+        response = supabase.table("Users").select("id, name, email, password_hash").eq("email", email).execute()
+        user_data = response.data
+
+        if user_data and len(user_data) > 0:
+            user = user_data[0]
+
+            # Vérification du mot de passe brut (⚠️ à remplacer par hash plus tard)
+            if user["password_hash"] == password:
+                st.success("Connexion réussie ✅")
+                st.session_state.user = {
+                    "id": user["id"],
+                    "name": user["name"],
+                    "email": user["email"]
+                }
+                st.session_state.page = "home"
+                st.rerun()
+            else:
+                st.error("Mot de passe incorrect ❌")
+        else:
+            st.error("Utilisateur introuvable ❌")
+
+    if st.button("Créer un compte"):
+        st.session_state.page = "signup"
+
+def signup_page():
+    st.title("Créer un compte")
+
+    name = st.text_input("Nom complet")
+    email = st.text_input("Adresse email")
+    password = st.text_input("Mot de passe", type="password")
+    confirm = st.text_input("Confirmer le mot de passe", type="password")
+
+    if st.button("S'inscrire"):
+        if password != confirm:
+            st.error("Les mots de passe ne correspondent pas.")
+            return
+
+        # Vérifier si l'utilisateur existe déjà
+        existing_user = supabase.table("Users").select("id").eq("email", email).execute()
+
+        if existing_user.data:
+            st.error("Un compte avec cet email existe déjà ❌")
+            return
+
+        # Créer l'utilisateur dans Supabase
+        response = supabase.table("Users").insert({
+            "name": name,
+            "email": email,
+            "password_hash": password  # ⚠️ pour MVP, mot de passe en clair
+        }).execute()
+
+        if response.data:
+            st.success("Compte créé avec succès 🎉")
+            st.session_state.page = "login"
+            st.rerun()
+        else:
+            st.error("Erreur lors de la création du compte ❌")
 
 def check_credentials(email, password):
     resp = supabase.table("Users").select("*").eq("email", email).execute()
@@ -38,7 +107,6 @@ def save_user(name, email, password):
         "email": email,
         "password_hash": password
     }).execute()
-
 
 # --------------------- STATS & CLASSEMENT ---------------------
 
@@ -78,6 +146,104 @@ def get_user_streak(user_id):
             break
     return streak
 
+def analyser_progression(user_id, last_obs_id=None):
+    import math
+    st.write("[DEBUG] Début de l’analyse de progression")
+
+    # 1️⃣ Récupérer le dernier suivi
+    last_suivi = supabase.table("Suivi_Parcours")\
+        .select("Parcours_Id,Derniere_Observation_Id,id")\
+        .eq("Users_Id", user_id)\
+        .order("id", desc=True)\
+        .limit(1)\
+        .execute().data
+
+    # 2️⃣ Initialisation si aucun suivi
+    if not last_suivi:
+        st.write("[DEBUG] Initialisation du premier suivi")
+        first_parcours = supabase.table("Parcours")\
+            .select("id")\
+            .order("id")\
+            .limit(1)\
+            .execute().data
+        if first_parcours:
+            parcours_id = first_parcours[0]["id"]
+            supabase.table("Suivi_Parcours").insert({
+                "Users_Id": user_id,
+                "Parcours_Id": parcours_id,
+                "Date": datetime.now().strftime("%Y-%m-%d"),
+                "Taux_Reussite": 0,
+                "Type_Evolution": "initialisation",
+                "Derniere_Observation_Id": last_obs_id or 0
+            }).execute()
+        return
+
+    parcours_id = last_suivi[0]["Parcours_Id"]
+    last_obs_used = last_suivi[0]["Derniere_Observation_Id"]
+
+    # 3️⃣ Récupérer le critère
+    parcours_data = supabase.table("Parcours")\
+        .select("Critere")\
+        .eq("id", parcours_id)\
+        .execute().data
+    if not parcours_data:
+        return
+    critere_initial = parcours_data[0]["Critere"]
+
+    # 4️⃣ Récupérer toutes les nouvelles observations depuis le dernier suivi
+    observations = supabase.table("Observation")\
+        .select("id,Etat")\
+        .gt("id", last_obs_used)\
+        .execute().data
+
+    total_obs = len(observations)
+    st.write(f"[DEBUG] Total nouvelles observations : {total_obs}")
+
+    if total_obs < critere_initial:
+        st.write("[DEBUG] Pas encore assez de données pour évaluer le test.")
+        return
+
+    # 5️⃣ Calcul du taux de réussite
+    selection = observations[-critere_initial:]
+    nb_bonnes = sum(1 for obs in selection if obs["Etat"] == "VRAI")
+    taux = round(nb_bonnes / critere_initial, 2)
+    st.write(f"[DEBUG] Taux de réussite : {taux}")
+
+    # 6️⃣ Déterminer évolution
+    evolution = "stagnation"
+    if taux >= 0.8:
+        evolution = "progression"
+        next_parcours = supabase.table("Parcours")\
+            .select("id")\
+            .gt("id", parcours_id)\
+            .order("id")\
+            .limit(1)\
+            .execute().data
+        if next_parcours:
+            parcours_id = next_parcours[0]["id"]
+    elif taux < 0.5:
+        evolution = "régression"
+        prev_parcours = supabase.table("Parcours")\
+            .select("id")\
+            .lt("id", parcours_id)\
+            .order("id", desc=True)\
+            .limit(1)\
+            .execute().data
+        if prev_parcours:
+            parcours_id = prev_parcours[0]["id"]
+
+    # 7️⃣ Insérer le suivi mis à jour
+    supabase.table("Suivi_Parcours").insert({
+        "Users_Id": user_id,
+        "Parcours_Id": parcours_id,
+        "Date": datetime.now().strftime("%Y-%m-%d"),
+        "Taux_Reussite": taux,
+        "Type_Evolution": evolution,
+        "Derniere_Observation_Id": last_obs_id
+    }).execute()
+
+    st.write(f"[DEBUG] Test critique enregistré : {evolution.upper()} — nouvelle position {parcours_id}")
+
 def get_classement(limit=None):
     users = supabase.table("Users").select("id,name").execute().data or []
     if not users:
@@ -94,7 +260,6 @@ def get_classement(limit=None):
     classement = [(u["id"], u["name"], scores[u["id"]]) for u in users]
     classement.sort(key=lambda x: x[2], reverse=True)
     return classement[:limit] if limit else classement
-
 
 # --------------------- PIXEL MONSTRE ---------------------
 
@@ -186,7 +351,7 @@ def log_responses_to_supabase():
     user_id = st.session_state.user["id"]
     nb_q = len(st.session_state.answers)
 
-    # 1. Créer un Entrainement
+    # 1️⃣ Créer un Entrainement
     entr = supabase.table("Entrainement").insert({
         "Users_Id": user_id,
         "Date": now.strftime("%Y-%m-%d"),
@@ -195,19 +360,34 @@ def log_responses_to_supabase():
     }).execute()
     entrainement_id = entr.data[0]["id"]
 
-    # 2. Insérer chaque observation
+    # 2️⃣ Préparer les observations à insérer en batch
+    observations_data = []
     for entry in st.session_state.answers:
         is_correct = entry["is_correct"]
         corrected = entry.get("corrected", False)
         score = 1 if is_correct else (0.5 if corrected else -1)
-        supabase.table("Observation").insert({
+        etat = "VRAI" if is_correct else "FAUX"
+        correction = "OUI" if corrected else "NON"
+
+        observations_data.append({
             "Entrainement_Id": entrainement_id,
             "Question": entry["question"],
-            "Etat": "VRAI" if is_correct else "FAUX",
-            "Correction": "OUI" if corrected else "NON",
+            "Etat": etat,
+            "Correction": correction,
             "Score": score
-        }).execute()
+        })
 
+    # 3️⃣ Insérer toutes les observations d’un coup
+    inserted = supabase.table("Observation").insert(observations_data).execute()
+
+    # 4️⃣ Récupérer l’ID de la dernière observation
+    last_obs_id = max(obs["id"] for obs in inserted.data)
+
+    # 5️⃣ Analyser la progression immédiatement
+    try:
+        analyser_progression(user_id, last_obs_id)
+    except Exception as e:
+        st.warning(f"⚠️ Impossible d'analyser la progression : {e}")
 
 # --------------------- PAGES ---------------------
 
