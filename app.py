@@ -348,14 +348,6 @@ Donne UNIQUEMENT la réponse sous forme JSON, sans texte avant ni après, en res
         if parcours_id:
             save_exercice_to_supabase(result, parcours_id)
 
-        # --- DEBUG SUPABASE ---
-        st.write("🌐 DEBUG Insertion Exercice")
-        st.write("Utilisateur :", st.session_state.get("user"))
-        st.write("Parcours_Id utilisé :", parcours_id)
-
-        response_insert = supabase.table("Exercices").insert(exercice_data).execute()
-        st.write("📥 Réponse Supabase :", response_insert)
-
         return result
     except Exception as e:
         st.warning(f"❌ Erreur GPT : {e}")
