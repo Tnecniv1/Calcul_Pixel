@@ -1,6 +1,7 @@
 import streamlit as st
 import json
 import os
+import bcrypt
 from PIL import Image
 import numpy as np
 from openai import OpenAI
@@ -33,15 +34,19 @@ def login_page():
     password = st.text_input("Mot de passe", type="password")
 
     if st.button("Se connecter"):
-        # Vérifie les identifiants avec Supabase
-        response = supabase.table("Users").select("id, name, email, password_hash").eq("email", email).execute()
+        # Récupère l'utilisateur par email
+        response = supabase.table("Users")\
+            .select("id, name, email, password_hash")\
+            .eq("email", email)\
+            .execute()
         user_data = response.data
 
         if user_data and len(user_data) > 0:
             user = user_data[0]
 
-            # Vérification du mot de passe brut (⚠️ à remplacer par hash plus tard)
-            if user["password_hash"] == password:
+            # 🔹 Vérification bcrypt
+            stored_hash = user["password_hash"]
+            if bcrypt.checkpw(password.encode("utf-8"), stored_hash.encode("utf-8")):
                 st.success("Connexion réussie ✅")
                 st.session_state.user = {
                     "id": user["id"],
@@ -73,16 +78,18 @@ def signup_page():
 
         # Vérifier si l'utilisateur existe déjà
         existing_user = supabase.table("Users").select("id").eq("email", email).execute()
-
         if existing_user.data:
             st.error("Un compte avec cet email existe déjà ❌")
             return
 
-        # Créer l'utilisateur dans Supabase
+        # 🔹 Hachage sécurisé du mot de passe
+        hashed_password = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+        # 🔹 Créer l'utilisateur dans Supabase
         response = supabase.table("Users").insert({
             "name": name,
             "email": email,
-            "password_hash": password  # ⚠️ pour MVP, mot de passe en clair
+            "password_hash": hashed_password
         }).execute()
 
         if response.data:
@@ -434,8 +441,8 @@ def home_page():
         streak = get_user_streak(user_id)
 
         st.markdown(f"### 🏆 Score cumulé : **{total_score}** points")
-        st.markdown(f"### 📚 Position actuelle : **{position['sujet']} | {position['Lecon']} | {position['niveau']}**")
-        st.markdown(f"### 🔥 Série en cours : **{streak}** jour(s) consécutif(s)")
+        st.markdown(f"### 📚 Niveau {position['niveau']} : **{position['sujet']} | {position['Lecon']}**")
+        st.markdown(f"### 🔥 Série en cours : **{streak}** jours !")
 
         if "pixel_image" not in st.session_state:
             try:
