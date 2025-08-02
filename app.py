@@ -331,10 +331,53 @@ Donne UNIQUEMENT la réponse sous forme JSON, sans texte avant ni après, en res
         )
         content = response.choices[0].message.content.strip()
         result = json.loads(content)
+        # Récupérer le parcours actuel pour lier l'exercice
+        user_id = st.session_state.user["id"]
+
+        parcours = get_position_actuelle(user_id)
+        # Récupérer l'ID exact du parcours dans la table Suivi_Parcours
+        parcours_id = supabase.table("Suivi_Parcours")\
+            .select("Parcours_Id")\
+            .eq("Users_Id", user_id)\
+            .order("id", desc=True)\
+            .limit(1)\
+            .execute().data
+            
+        parcours_id = parcours_id[0]["Parcours_Id"] if parcours_id else None
+        # Sauvegarder dans Exercices
+        if parcours_id:
+            save_exercice_to_supabase(result, parcours_id)
+
+        # --- DEBUG SUPABASE ---
+        st.write("🌐 DEBUG Insertion Exercice")
+        st.write("Utilisateur :", st.session_state.get("user"))
+        st.write("Parcours_Id utilisé :", parcours_id)
+
+        response_insert = supabase.table("Exercices").insert(exercice_data).execute()
+        st.write("📥 Réponse Supabase :", response_insert)
+
         return result
     except Exception as e:
         st.warning(f"❌ Erreur GPT : {e}")
         return None
+
+def save_exercice_to_supabase(question_data, parcours_id):
+    """Enregistre un exercice généré dans la table Exercices."""
+    try:
+        supabase.table("Exercices").insert({
+            "Parcours_Id": parcours_id,
+            "Origine": "GPT",
+            "Probleme": question_data["question"],
+            "Solution": question_data["answer"],
+            "Choix_Un": question_data["choices"][0],
+            "Choix_Deux": question_data["choices"][1],
+            "Choix_Trois": question_data["choices"][2],
+            "Choix_Quatre": question_data["choices"][3],
+            "Indice_Un": question_data["hints"][0] if len(question_data["hints"]) > 0 else None,
+            "Indice_Deux": question_data["hints"][1] if len(question_data["hints"]) > 1 else None,
+        }).execute()
+    except Exception as e:
+        st.warning(f"⚠️ Impossible d'enregistrer l'exercice : {e}")
 
 def generate_questions(n):
     user_id = st.session_state.user["id"]
@@ -486,7 +529,7 @@ def result_page():
         if entry["is_correct"]:
             st.markdown("✅ **Bonne réponse**")
         else:
-            st.markdown(f"❌ Mauvaise réponse — La bonne était : `{entry['correct_answer']}`")
+            st.markdown(f"❌ Mauvaise réponse !")
         st.markdown("---")
 
     if any(not e["is_correct"] for e in st.session_state.answers):
