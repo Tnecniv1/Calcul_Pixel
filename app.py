@@ -389,6 +389,10 @@ def generate_questions(n):
 # --------------------- LOGIQUE QCM ---------------------
 
 def log_responses_to_supabase():
+    # ✅ Empêche une double exécution
+    if st.session_state.get("responses_logged", False):
+        return
+
     now = datetime.now()
     user_id = st.session_state.user["id"]
     nb_q = len(st.session_state.answers)
@@ -406,10 +410,18 @@ def log_responses_to_supabase():
     observations_data = []
     for entry in st.session_state.answers:
         is_correct = entry["is_correct"]
-        corrected = entry.get("corrected", False)
-        score = 1 if is_correct else (0.5 if corrected else -1)
-        etat = "VRAI" if is_correct else "FAUX"
-        correction = "OUI" if corrected else "NON"
+        first_try_correction = entry.get("first_try_correction", False)
+
+        # 🔹 Calcul du score final
+        if is_correct:
+            score = 1
+        elif first_try_correction:
+            score = 1
+        else:
+            score = -1
+
+        etat = "VRAI" if is_correct or first_try_correction else "FAUX"
+        correction = "OUI" if entry.get("corrected", False) else "NON"
 
         observations_data.append({
             "Entrainement_Id": entrainement_id,
@@ -430,6 +442,9 @@ def log_responses_to_supabase():
         analyser_progression(user_id, last_obs_id)
     except Exception as e:
         st.warning(f"⚠️ Impossible d'analyser la progression : {e}")
+
+    # 6️⃣ Marquer comme déjà loggé pour éviter doublon
+    st.session_state.responses_logged = True
 
 # --------------------- PAGES ---------------------
 
@@ -572,12 +587,25 @@ def correction_page():
         if st.button(choice):
             if choice == current["correct_answer"]:
                 st.success("✅ Bonne réponse !")
-                st.session_state.score += 0.5
+
+                # 🔹 Marquer la correction dans la session
                 current["corrected"] = True
+                current["first_try_correction"] = (st.session_state.attempts == 0)
+
+                # 🔹 Ajustement du score affiché
+                if st.session_state.attempts == 0:
+                    # On annule le -1 initial et on donne +1 net
+                    st.session_state.score += 2  # (-1 initial +2 = +1 final)
+                else:
+                    # On ne change rien : le score reste à -1
+                    pass
+
+                # 🔹 Passage à la question suivante
                 st.session_state.correction_index += 1
                 st.session_state.hint_index = 0
                 st.session_state.attempts = 0
                 st.rerun()
+
             else:
                 st.session_state.hint_index += 1
                 st.session_state.attempts += 1
