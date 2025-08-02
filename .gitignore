@@ -1,6 +1,0 @@
-__pycache__/
-*.pyc
-.env
-config.py
-.streamlit/secrets.toml
-monstro.db
