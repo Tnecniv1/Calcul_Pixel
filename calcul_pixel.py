@@ -539,19 +539,27 @@ def calcul_mental_page():
 
     st.subheader(f"Question {st.session_state.current_q + 1}/{len(st.session_state.questions)}")
     st.markdown(f"### {q['problem']}")
-    st.markdown(f"**Réponse actuelle :** {st.session_state.current_answer or '_'}")
 
-    # --- Calculette fluide façon Tkinter ---
+    # --- Champ de saisie qui agit comme l'écran ---
+    st.session_state.current_answer = st.text_input(
+        "Réponse",
+        value=st.session_state.current_answer,
+        key=f"answer_{st.session_state.current_q}"
+    )
+
+    # --- Clavier numérique fluide ---
     cols = st.columns(3)
     digits = ["1","2","3","4","5","6","7","8","9","0"]
 
     for i, digit in enumerate(digits):
         if cols[i % 3].button(digit, key=f"digit_{st.session_state.current_q}_{digit}"):
             st.session_state.current_answer += digit
+            st.experimental_rerun()  # 🔹 Force l'update immédiat du champ
 
     col_del, col_val = st.columns(2)
     if col_del.button("🗑 Effacer"):
         st.session_state.current_answer = st.session_state.current_answer[:-1]
+        st.experimental_rerun()
     if col_val.button("✅ Valider"):
         # Stocker la réponse
         try:
@@ -566,7 +574,7 @@ def calcul_mental_page():
             st.session_state.current_q += 1
         else:
             st.session_state.page = "result"
-        st.rerun()
+        st.experimental_rerun()
 
 def result_page():
     st.title("📊 Résultats de la session")
