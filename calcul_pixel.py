@@ -2,6 +2,8 @@ import streamlit as st
 import json
 import os
 import bcrypt
+import random
+from datetime import datetime
 from PIL import Image
 import numpy as np
 from openai import OpenAI
@@ -296,69 +298,37 @@ def render_monstre_progress(score, mask):
 
 # --------------------- GPT QCM ---------------------
 
-def generate_question_from_openai(sujet, lecon, niveau):
-    prompt = f"""
-Tu es un brillant mathématicien spécialisé dans l'enseignement des mathématiques.
+def generate_calcul_mental_batch(user_id, volume):
+    difficulte = get_user_difficulty(user_id)
+    questions = []
 
-Génère UNE seule question de type QCM qui respecte les instructions suivantes :
+    # Définir bornes selon difficulté
+    if difficulte <= 10:
+        min_val, max_val = 1, 10
+    elif difficulte <= 20:
+        min_val, max_val = 1, 20
+    elif difficulte <= 30:
+        min_val, max_val = 1, 50
+    else:
+        min_val, max_val = 1, 100
 
-📘 Sujet : {sujet}
-📗 Leçon : {lecon}
-🎓 Niveau : {niveau}
+    # 1️⃣ Additions
+    for _ in range(volume):
+        x, y = random.randint(min_val, max_val), random.randint(min_val, max_val)
+        questions.append({"problem": f"{x} + {y}", "answer": x + y, "type": "addition"})
 
-Détails :
-- Le sujet décrit le thème mathématique général
-- La leçon décrit le sous-thème à travailler
-- Le niveau décrit si la question est facile, moyenne ou difficile
+    # 2️⃣ Soustractions
+    for _ in range(volume):
+        x, y = random.randint(min_val, max_val), random.randint(min_val, max_val)
+        x, y = max(x, y), min(x, y)  # éviter négatifs
+        questions.append({"problem": f"{x} - {y}", "answer": x - y, "type": "soustraction"})
 
-Objectifs :
-- La question doit être claire, concise et stimulante
-- Les 4 choix proposés doivent être plausibles, mais une seule réponse doit être correcte
-- La difficulté doit correspondre au niveau
-- La question doit obliger l’élève à réfléchir (évite le par cœur ou le trop évident)
-- La réponse doit être juste, vérifiable et cohérente avec le programme
-- Pas de répétitions d’une génération à l’autre
-- Varie les situations, noms ou contextes pour chaque génération
+    # 3️⃣ Multiplications
+    for _ in range(volume):
+        x, y = random.randint(min_val, max_val), random.randint(min_val, max_val)
+        questions.append({"problem": f"{x} x {y}", "answer": x * y, "type": "multiplication"})
 
-Donne UNIQUEMENT la réponse sous forme JSON, sans texte avant ni après, en respectant strictement ce format :
-
-{{
-    "question": "string",
-    "choices": ["string","string","string","string"],
-    "answer": "string",
-    "hints": ["string","string","string"]
-}}
-"""
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.8
-        )
-        content = response.choices[0].message.content.strip()
-        result = json.loads(content)
-        # Récupérer le parcours actuel pour lier l'exercice
-        user_id = st.session_state.user["id"]
-
-        parcours = get_position_actuelle(user_id)
-        # Récupérer l'ID exact du parcours dans la table Suivi_Parcours
-        parcours_id = supabase.table("Suivi_Parcours")\
-            .select("Parcours_Id")\
-            .eq("Users_Id", user_id)\
-            .order("id", desc=True)\
-            .limit(1)\
-            .execute().data
-            
-        parcours_id = parcours_id[0]["Parcours_Id"] if parcours_id else None
-        # Sauvegarder dans Exercices
-        if parcours_id:
-            save_exercice_to_supabase(result, parcours_id)
-
-        return result
-    except Exception as e:
-        st.warning(f"❌ Erreur GPT : {e}")
-        return None
+    return questions
 
 def save_exercice_to_supabase(question_data, parcours_id):
     """Enregistre un exercice généré dans la table Exercices."""
@@ -469,21 +439,21 @@ def home_page():
 
     user = st.session_state.get("user", {"name": "Utilisateur"})
     st.title(f"Bienvenue, {user['name']} 👋")
-    st.subheader("Combien de questions veux-tu faire aujourd’hui ?")
+    st.subheader("Combien d'opérations veux-tu faire aujourd'hui ?")
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        if st.button("5 questions"):
+        if st.button("5 calculs"):
             st.session_state.nb_questions = 5
-            st.session_state.page = "qcm"
+            st.session_state.page = "calcul_mental"
     with col2:
-        if st.button("10 questions"):
+        if st.button("10 calculs"):
             st.session_state.nb_questions = 10
-            st.session_state.page = "qcm"
+            st.session_state.page = "calcul_mental"
     with col3:
-        if st.button("50 questions"):
+        if st.button("50 calculs"):
             st.session_state.nb_questions = 50
-            st.session_state.page = "qcm"
+            st.session_state.page = "calcul_mental"
 
     st.subheader("🧩 Ton Pixel-Monstre")
     if "pixel_image" in st.session_state:
@@ -498,64 +468,132 @@ def home_page():
         st.session_state.clear()
         st.session_state.page = "login"
 
-def qcm_page():
-    st.title("Session d'entraînement")
+
+def get_user_difficulty(user_id):
+    suivi = supabase.table("Suivi_Parcours")\
+        .select("Parcours_Id")\
+        .eq("Users_Id", user_id)\
+        .order("id", desc=True)\
+        .limit(1)\
+        .execute().data
+    
+    if not suivi:
+        return 1  # difficulté minimale par défaut
+    
+    parcours_id = suivi[0]["Parcours_Id"]
+    parcours = supabase.table("Parcours")\
+        .select("Difficulte")\
+        .eq("id", parcours_id)\
+        .execute().data
+    
+    return parcours[0]["Difficulte"] if parcours else 1
+
+
+def generate_calcul_mental_batch(user_id, volume):
+    """Génère un batch ordonné de calculs mentaux selon la difficulté utilisateur"""
+    difficulte = get_user_difficulty(user_id)
+    questions = []
+
+    # Paramétrage dynamique selon difficulté
+    if difficulte <= 10:
+        min_val, max_val = 1, 10
+    elif difficulte <= 20:
+        min_val, max_val = 1, 20
+    elif difficulte <= 30:
+        min_val, max_val = 1, 50
+    else:
+        min_val, max_val = 1, 100
+
+    # --- Additions
+    for _ in range(volume):
+        x, y = random.randint(min_val, max_val), random.randint(min_val, max_val)
+        questions.append({"problem": f"{x} + {y}", "answer": x + y, "type": "addition"})
+
+    # --- Soustractions
+    for _ in range(volume):
+        x, y = random.randint(min_val, max_val), random.randint(min_val, max_val)
+        x, y = max(x, y), min(x, y)  # éviter négatifs
+        questions.append({"problem": f"{x} - {y}", "answer": x - y, "type": "soustraction"})
+
+    # --- Multiplications
+    for _ in range(volume):
+        x, y = random.randint(min_val, max_val), random.randint(min_val, max_val)
+        questions.append({"problem": f"{x} x {y}", "answer": x * y, "type": "multiplication"})
+
+    return questions
+
+
+def calcul_mental_page():
+    st.title("🧠 Session de Calcul Mental")
+
+    # --- Initialisation de session ---
     if "questions" not in st.session_state:
-        st.session_state.questions = generate_questions(st.session_state.get("nb_questions", 5))
+        user_id = st.session_state.user["id"]
+        volume = st.session_state.get("nb_questions", 5)
+        st.session_state.questions = generate_calcul_mental_batch(user_id, volume)
         st.session_state.current_q = 0
-        st.session_state.correct = 0
         st.session_state.answers = []
-        st.session_state.score = 0
+        st.session_state.current_answer = ""
 
     q = st.session_state.questions[st.session_state.current_q]
-    st.subheader(f"Question {st.session_state.current_q + 1} / {len(st.session_state.questions)}")
-    st.write(q["question"])
 
-    for choice in q["choices"]:
-        if st.button(choice):
-            is_correct = choice == q["answer"]
-            st.session_state.answers.append({
-                "question": q["question"],
-                "choices": q["choices"],
-                "user_answer": choice,
-                "correct_answer": q["answer"],
-                "is_correct": is_correct,
-                "hints": q.get("hints", [])
-            })
-            st.session_state.correct += int(is_correct)
-            st.session_state.score += 1 if is_correct else -1
-            if st.session_state.current_q + 1 < len(st.session_state.questions):
-                st.session_state.current_q += 1
-            else:
-                st.session_state.page = "result"
-            st.rerun()
+    st.subheader(f"Question {st.session_state.current_q + 1}/{len(st.session_state.questions)}")
+    st.markdown(f"### {q['problem']}")
+    st.markdown(f"**Réponse actuelle :** {st.session_state.current_answer or '_'}")
+
+    # --- Calculette fluide façon Tkinter ---
+    cols = st.columns(3)
+    digits = ["1","2","3","4","5","6","7","8","9","0"]
+
+    for i, digit in enumerate(digits):
+        if cols[i % 3].button(digit, key=f"digit_{st.session_state.current_q}_{digit}"):
+            st.session_state.current_answer += digit
+
+    col_del, col_val = st.columns(2)
+    if col_del.button("🗑 Effacer"):
+        st.session_state.current_answer = st.session_state.current_answer[:-1]
+    if col_val.button("✅ Valider"):
+        # Stocker la réponse
+        try:
+            answer = int(st.session_state.current_answer or 0)
+        except ValueError:
+            answer = None
+        st.session_state.answers.append(answer)
+        st.session_state.current_answer = ""
+
+        # Passer à la question suivante ou finir
+        if st.session_state.current_q + 1 < len(st.session_state.questions):
+            st.session_state.current_q += 1
+        else:
+            st.session_state.page = "result"
+        st.rerun()
 
 def result_page():
-    st.title("Résultats de la session 🧠")
+    st.title("📊 Résultats de la session")
     total = len(st.session_state.questions)
-    score = st.session_state.correct
-    st.success(f"Tu as obtenu {score} / {total} bonnes réponses ✅")
-    st.info(f"💯 Score total : {st.session_state.get('score', 0)} points")
+    score = 0
 
-    for entry in st.session_state.answers:
-        st.write(f"- **Q:** {entry['question']}")
-        st.write(f"   👉 Ta réponse : `{entry['user_answer']}`")
-        if entry["is_correct"]:
-            st.markdown("✅ **Bonne réponse**")
-        else:
-            st.markdown(f"❌ Mauvaise réponse !")
+    # --- Récapitulatif ---
+    for i, (q, user_ans) in enumerate(zip(st.session_state.questions, st.session_state.answers)):
+        correct_ans = q["answer"]
+        is_correct = (user_ans == correct_ans)
+        if is_correct:
+            score += 1
+        st.write(f"**Q{i+1} : {q['problem']}**")
+        st.write(f"👉 Ta réponse : `{user_ans}` | ✅ Réponse : `{correct_ans}`")
+        st.markdown("✅ **Bonne réponse**" if is_correct else "❌ **Mauvaise réponse**")
         st.markdown("---")
 
-    if any(not e["is_correct"] for e in st.session_state.answers):
-        if st.button("Corriger mes erreurs"):
-            st.session_state.page = "correction"
-            st.rerun()
+    st.success(f"Score final : {score}/{total} 🎉")
 
+    # 🔹 Enregistrement Supabase
     if st.button("Retour à l’accueil"):
-        log_responses_to_supabase()
-        for k in ["questions", "current_q", "correct", "answers", "nb_questions", "score"]:
+        log_responses_to_supabase()  # conserve ta logique existante
+        # Nettoyer la session pour une nouvelle partie
+        for k in ["questions", "current_q", "answers", "current_answer", "nb_questions"]:
             st.session_state.pop(k, None)
         st.session_state.page = "home"
+        st.rerun()
 
 def correction_page():
     st.title("Correction interactive des erreurs 🛠️")
@@ -644,8 +682,8 @@ elif st.session_state.page == "signup":
     signup_page()
 elif st.session_state.page == "home":
     home_page()
-elif st.session_state.page == "qcm":
-    qcm_page()
+elif st.session_state.page == "calcul_mental":
+    calcul_mental_page()
 elif st.session_state.page == "result":
     result_page()
 elif st.session_state.page == "correction":
