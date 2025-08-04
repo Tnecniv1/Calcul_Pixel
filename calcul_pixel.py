@@ -120,27 +120,13 @@ def save_user(name, email, password):
 # --------------------- STATS & CLASSEMENT ---------------------
 
 def get_user_total_score(user_id):
-    # Récupérer tous les entraînements liés à l'utilisateur
+    # Récupère toutes les observations liées à l'utilisateur
     entrainements = supabase.table("Entrainement").select("id").eq("Users_Id", user_id).execute().data or []
     if not entrainements:
-        return 0  # Aucun entraînement → score 0
-
-    # Extraire les IDs (castés en int pour éviter les types NumPy)
-    entrainement_ids = [int(e["id"]) for e in entrainements if e.get("id") is not None]
-    if not entrainement_ids:
-        return 0  # Liste vide → pas d'appel à .in_()
-
-    # Requête sécurisée sur Observation
-    observations = (
-        supabase.table("Observation")
-        .select("Score,Entrainement_Id")
-        .in_("Entrainement_Id", entrainement_ids)
-        .execute()
-        .data or []
-    )
-
-    return sum(int(obs.get("Score", 0)) for obs in observations)
-
+        return 0
+    entrainement_ids = [e["id"] for e in entrainements]
+    observations = supabase.table("Observation").select("Score,Entrainement_Id").in_("Entrainement_Id", entrainement_ids).execute().data or []
+    return sum(obs["Score"] for obs in observations)
 
 def get_position_actuelle(user_id):
     suivi = supabase.table("Suivi_Parcours").select("Parcours_Id").eq("Users_Id", user_id).order("id", desc=True).limit(1).execute().data
