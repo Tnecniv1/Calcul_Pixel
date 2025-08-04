@@ -526,7 +526,7 @@ def generate_calcul_mental_batch(user_id, volume):
 def calcul_mental_page():
     st.title("🧠 Session de Calcul Mental")
 
-    # --- Initialisation session ---
+    # Initialisation session
     if "questions" not in st.session_state:
         user_id = st.session_state.user["id"]
         volume = st.session_state.get("nb_questions", 5)
@@ -535,82 +535,75 @@ def calcul_mental_page():
         st.session_state.answers = []
         st.session_state.current_answer = ""
 
-        # ✅ Créer l'Entrainement dès le début
-        now = datetime.now()
-        entr = supabase.table("Entrainement").insert({
-            "Users_Id": user_id,
-            "Date": now.strftime("%Y-%m-%d"),
-            "Time": now.strftime("%H:%M"),
-            "Volume": volume
-        }).execute()
-        st.session_state.entrainement_id = entr.data[0]["id"]
-
     q = st.session_state.questions[st.session_state.current_q]
 
-    st.subheader(f"Question {st.session_state.current_q + 1}/{len(st.session_state.questions)}")
-    st.markdown(f"### {q['problem']}")
+    # Conteneur centré
+    with st.container():
+        st.markdown(
+            """
+            <div style="display:flex;justify-content:center;">
+                <div style="background-color:#f9f9f9;padding:30px;border-radius:15px;width:300px;text-align:center;box-shadow:0px 0px 10px rgba(0,0,0,0.1);">
+            """,
+            unsafe_allow_html=True
+        )
 
-    # --- Écran de saisie ---
-    st.session_state.current_answer = st.text_input(
-        "Réponse",
-        value=st.session_state.current_answer,
-        key=f"answer_{st.session_state.current_q}"
-    )
+        st.subheader(f"Question {st.session_state.current_q + 1}/{len(st.session_state.questions)}")
+        st.markdown(f"### {q['problem']}")
+        st.markdown(f"**Réponse actuelle :** {st.session_state.current_answer or '_'}")
 
-    # --- Clavier numérique ---
-    cols = st.columns(3)
-    digits = ["1","2","3","4","5","6","7","8","9","0"]
+        # --- Calculette
+        digits = list(map(str, range(10)))
+        random.shuffle(digits)
 
-    for i, digit in enumerate(digits):
-        if cols[i % 3].button(digit, key=f"digit_{st.session_state.current_q}_{digit}"):
-            st.session_state.current_answer += digit
-            st.experimental_rerun()
+        # Formulaire pour éviter rerun multiples
+        with st.form(key=f"calc_form_{st.session_state.current_q}"):
+            cols = st.columns(5)
+            for i, digit in enumerate(digits):
+                if cols[i % 5].form_submit_button(digit):
+                    st.session_state.current_answer += digit
 
-    col_del, col_val = st.columns(2)
-    if col_del.button("🗑 Effacer"):
-        st.session_state.current_answer = st.session_state.current_answer[:-1]
-        st.experimental_rerun()
-    if col_val.button("✅ Valider"):
-        try:
-            answer = int(st.session_state.current_answer or 0)
-        except ValueError:
-            answer = None
-        st.session_state.answers.append(answer)
-        st.session_state.current_answer = ""
+            col_del, col_val = st.columns(2)
+            if col_del.form_submit_button("🗑"):
+                st.session_state.current_answer = st.session_state.current_answer[:-1]
+            if col_val.form_submit_button("✅ Valider"):
+                # Stocker la réponse
+                st.session_state.answers.append(int(st.session_state.current_answer or 0))
+                st.session_state.current_answer = ""
+                if st.session_state.current_q + 1 < len(st.session_state.questions):
+                    st.session_state.current_q += 1
+                else:
+                    st.session_state.page = "result"
+                st.rerun()
 
-        # Fin ou question suivante
-        if st.session_state.current_q + 1 < len(st.session_state.questions):
-            st.session_state.current_q += 1
-        else:
-            st.session_state.page = "result"
-        st.experimental_rerun()
+        st.markdown("</div></div>", unsafe_allow_html=True)
+
 
 def result_page():
-    st.title("📊 Résultats de la session")
+    st.title("Résultats de la session 🧠")
     total = len(st.session_state.questions)
-    score = 0
+    score = st.session_state.correct
+    st.success(f"Tu as obtenu {score} / {total} bonnes réponses ✅")
+    st.info(f"💯 Score total : {st.session_state.get('score', 0)} points")
 
-    # --- Récapitulatif ---
-    for i, (q, user_ans) in enumerate(zip(st.session_state.questions, st.session_state.answers)):
-        correct_ans = q["answer"]
-        is_correct = (user_ans == correct_ans)
-        if is_correct:
-            score += 1
-        st.write(f"**Q{i+1} : {q['problem']}**")
-        st.write(f"👉 Ta réponse : `{user_ans}` | ✅ Réponse : `{correct_ans}`")
-        st.markdown("✅ **Bonne réponse**" if is_correct else "❌ **Mauvaise réponse**")
+    for entry in st.session_state.answers:
+        st.write(f"- **Q:** {entry['question']}")
+        st.write(f"   👉 Ta réponse : `{entry['user_answer']}`")
+        if entry["is_correct"]:
+            st.markdown("✅ **Bonne réponse**")
+        else:
+            st.markdown(f"❌ Mauvaise réponse !")
         st.markdown("---")
 
-    st.success(f"Score final : {score}/{total} 🎉")
+    if any(not e["is_correct"] for e in st.session_state.answers):
+        if st.button("Corriger mes erreurs"):
+            st.session_state.page = "correction"
+            st.rerun()
 
-    # 🔹 Enregistrement Supabase
     if st.button("Retour à l’accueil"):
-        log_responses_to_supabase()  # conserve ta logique existante
-        # Nettoyer la session pour une nouvelle partie
-        for k in ["questions", "current_q", "answers", "current_answer", "nb_questions"]:
+        log_responses_to_supabase()
+        for k in ["questions", "current_q", "correct", "answers", "nb_questions", "score"]:
             st.session_state.pop(k, None)
         st.session_state.page = "home"
-        st.rerun()
 
 def correction_page():
     st.title("Correction interactive des erreurs 🛠️")
@@ -707,4 +700,6 @@ elif st.session_state.page == "correction":
     correction_page()
 elif st.session_state.page == "classement":
     classement_page()
+
+
 
