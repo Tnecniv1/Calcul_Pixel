@@ -125,7 +125,7 @@ def get_user_total_score(user_id):
     if not entrainements:
         return 0
     entrainement_ids = [e["id"] for e in entrainements]
-    observations = supabase.table("Observation").select("Score,Entrainement_Id").in_("Entrainement_Id", entrainement_ids).execute().data or []
+    observations = supabase.table("Observations").select("Score,Entrainement_Id").in_("Entrainement_Id", entrainement_ids).execute().data or []
     return sum(obs["Score"] for obs in observations)
 
 def get_position_actuelle(user_id):
@@ -161,7 +161,7 @@ def analyser_progression(user_id, last_obs_id=None):
 
     # 1️⃣ Récupérer le dernier suivi
     last_suivi = supabase.table("Suivi_Parcours")\
-        .select("Parcours_Id,Derniere_Observation_Id,id")\
+        .select("Parcours_Id,Derniere_Observations_Id,id")\
         .eq("Users_Id", user_id)\
         .order("id", desc=True)\
         .limit(1)\
@@ -183,12 +183,12 @@ def analyser_progression(user_id, last_obs_id=None):
                 "Date": datetime.now().strftime("%Y-%m-%d"),
                 "Taux_Reussite": 0,
                 "Type_Evolution": "initialisation",
-                "Derniere_Observation_Id": last_obs_id or 0
+                "Derniere_Observations_Id": last_obs_id or 0
             }).execute()
         return
 
     parcours_id = last_suivi[0]["Parcours_Id"]
-    last_obs_used = last_suivi[0]["Derniere_Observation_Id"]
+    last_obs_used = last_suivi[0]["Derniere_Observations_Id"]
 
     # 3️⃣ Récupérer le critère
     parcours_data = supabase.table("Parcours")\
@@ -200,7 +200,7 @@ def analyser_progression(user_id, last_obs_id=None):
     critere_initial = parcours_data[0]["Critere"]
 
     # 4️⃣ Récupérer toutes les nouvelles observations depuis le dernier suivi
-    observations = supabase.table("Observation")\
+    observations = supabase.table("Observations")\
         .select("id,Etat")\
         .gt("id", last_obs_used)\
         .execute().data
@@ -248,7 +248,7 @@ def analyser_progression(user_id, last_obs_id=None):
         "Date": datetime.now().strftime("%Y-%m-%d"),
         "Taux_Reussite": taux,
         "Type_Evolution": evolution,
-        "Derniere_Observation_Id": last_obs_id
+        "Derniere_Observations_Id": last_obs_id
     }).execute()
 
     st.write(f"[DEBUG] Test critique enregistré : {evolution.upper()} — nouvelle position {parcours_id}")
@@ -258,7 +258,7 @@ def get_classement(limit=None):
     if not users:
         return []
     entrainements = supabase.table("Entrainement").select("id,Users_Id").execute().data or []
-    observations = supabase.table("Observation").select("Score,Entrainement_Id").execute().data or []
+    observations = supabase.table("Observations").select("Score,Entrainement_Id").execute().data or []
     # Mapping Entrainement -> User
     e_to_u = {e["id"]: e["Users_Id"] for e in entrainements}
     scores = {u["id"]: 0 for u in users}
@@ -402,7 +402,7 @@ def log_responses_to_supabase():
         })
 
     # 3️⃣ Insérer toutes les observations d’un coup
-    inserted = supabase.table("Observation").insert(observations_data).execute()
+    inserted = supabase.table("Observations").insert(observations_data).execute()
 
     # 4️⃣ Récupérer l’ID de la dernière observation
     last_obs_id = max(obs["id"] for obs in inserted.data)
