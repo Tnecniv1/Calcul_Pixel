@@ -526,7 +526,7 @@ def generate_calcul_mental_batch(user_id, volume):
 def calcul_mental_page():
     st.title("🧠 Session de Calcul Mental")
 
-    # --- Initialisation de session ---
+    # --- Initialisation session ---
     if "questions" not in st.session_state:
         user_id = st.session_state.user["id"]
         volume = st.session_state.get("nb_questions", 5)
@@ -535,25 +535,42 @@ def calcul_mental_page():
         st.session_state.answers = []
         st.session_state.current_answer = ""
 
+        # ✅ Créer l'Entrainement dès le début
+        now = datetime.now()
+        entr = supabase.table("Entrainement").insert({
+            "Users_Id": user_id,
+            "Date": now.strftime("%Y-%m-%d"),
+            "Time": now.strftime("%H:%M"),
+            "Volume": volume
+        }).execute()
+        st.session_state.entrainement_id = entr.data[0]["id"]
+
     q = st.session_state.questions[st.session_state.current_q]
 
     st.subheader(f"Question {st.session_state.current_q + 1}/{len(st.session_state.questions)}")
     st.markdown(f"### {q['problem']}")
-    st.markdown(f"**Réponse actuelle :** {st.session_state.current_answer or '_'}")
 
-    # --- Calculette fluide façon Tkinter ---
+    # --- Écran de saisie ---
+    st.session_state.current_answer = st.text_input(
+        "Réponse",
+        value=st.session_state.current_answer,
+        key=f"answer_{st.session_state.current_q}"
+    )
+
+    # --- Clavier numérique ---
     cols = st.columns(3)
     digits = ["1","2","3","4","5","6","7","8","9","0"]
 
     for i, digit in enumerate(digits):
         if cols[i % 3].button(digit, key=f"digit_{st.session_state.current_q}_{digit}"):
             st.session_state.current_answer += digit
+            st.experimental_rerun()
 
     col_del, col_val = st.columns(2)
     if col_del.button("🗑 Effacer"):
         st.session_state.current_answer = st.session_state.current_answer[:-1]
+        st.experimental_rerun()
     if col_val.button("✅ Valider"):
-        # Stocker la réponse
         try:
             answer = int(st.session_state.current_answer or 0)
         except ValueError:
@@ -561,12 +578,12 @@ def calcul_mental_page():
         st.session_state.answers.append(answer)
         st.session_state.current_answer = ""
 
-        # Passer à la question suivante ou finir
+        # Fin ou question suivante
         if st.session_state.current_q + 1 < len(st.session_state.questions):
             st.session_state.current_q += 1
         else:
             st.session_state.page = "result"
-        st.rerun()
+        st.experimental_rerun()
 
 def result_page():
     st.title("📊 Résultats de la session")
