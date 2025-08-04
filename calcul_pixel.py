@@ -593,7 +593,7 @@ def result_page():
         for k in ["questions", "current_q", "answers", "current_answer", "nb_questions"]:
             st.session_state.pop(k, None)
         st.session_state.page = "home"
-        st.rerun()cd 
+        st.rerun()
 
 def correction_page():
     st.title("Correction interactive des erreurs 🛠️")
