@@ -150,23 +150,50 @@ def get_position_actuelle(user_id: int):
     """
     Retourne la position actuelle de l'utilisateur dans le parcours,
     en regardant la dernière ligne de Suivi_Parcours.
-    Si aucune entrée, retourne None — à gérer ensuite dans analyser_progression().
+    Si aucune entrée, initialise au premier niveau (le plus bas).
     """
+    # 1. Récupérer les suivis existants, triés par ordre croissant (plus ancien -> plus récent)
     suivi = (
         supabase.table("Suivi_Parcours")
         .select("id, Parcours_Id")
         .eq("Users_Id", user_id)
-        .order("id", desc=True)
+        .order("id", desc=True)  # Dernière ligne = position actuelle
         .limit(1)
         .execute()
         .data
     )
 
+    # 1.2. Si vide → Initialisation au premier parcours
     if not suivi:
-        print(f"[DEBUG] Aucun suivi trouvé pour user_id={user_id}")
-        return None
+        print(f"DEBUG: Aucun suivi trouvé pour user_id={user_id}, initialisation…")
 
+        # Prendre le premier niveau dans Parcours (trié par Niveau)
+        premier_parcours = (
+            supabase.table("Parcours")
+            .select("*")
+            .order("Niveau")  # Niveau croissant
+            .limit(1)
+            .execute()
+            .data
+        )
+
+        if not premier_parcours:
+            print("ERREUR: Aucun parcours défini dans la base.")
+            return None
+
+        parcours_id = premier_parcours[0]["id"]
+
+        # Créer une entrée de suivi
+        supabase.table("Suivi_Parcours").insert({
+            "Users_Id": user_id,
+            "Parcours_Id": parcours_id
+        }).execute()
+
+        return premier_parcours[0]  # Renvoie la ligne du parcours (position actuelle)
+
+    # 1.1. Si déjà présent → On récupère le parcours associé à la dernière ligne
     parcours_id = suivi[0].get("Parcours_Id")
+
     if not parcours_id:
         print("ERREUR: 'Parcours_Id' manquant dans Suivi_Parcours")
         return None
@@ -235,11 +262,12 @@ def get_user_total_score(user_id: int) -> int:
     # 3️⃣ Somme des scores
     return sum(obs.get("Score", 0) for obs in observations)
 
-def analyser_progression(user_id, last_obs_id=None, parcours_id=None):
+
+def analyser_progression(user_id, last_obs_id=None):
     import math
     st.write("[DEBUG] Début de l’analyse de progression")
 
-    # 1️⃣ Récupérer le dernier suivi existant
+    # 1️⃣ Récupérer le dernier suivi
     last_suivi = supabase.table("Suivi_Parcours")\
         .select("Parcours_Id,Derniere_Observation_Id,id")\
         .eq("Users_Id", user_id)\
@@ -247,93 +275,58 @@ def analyser_progression(user_id, last_obs_id=None, parcours_id=None):
         .limit(1)\
         .execute().data
 
-    # 2️⃣ Cas initial : aucun suivi → on insère une première ligne complète
+    # 2️⃣ Initialisation si aucun suivi
     if not last_suivi:
-        st.write("[DEBUG] Aucun suivi existant, création du premier...")
-
-        # Parcours actuel
-        if not parcours_id:
-            first_parcours = supabase.table("Parcours")\
-                .select("id")\
-                .order("id")\
-                .limit(1)\
-                .execute().data
-            if not first_parcours:
-                st.error("❌ Aucun parcours disponible")
-                return
-            parcours_id = first_parcours[0]["id"]
-
-        # Trouver la première observation de l'utilisateur via son dernier entraînement
-        last_entr = supabase.table("Entrainement")\
-            .select("id")\
-            .eq("Users_Id", user_id)\
-            .order("id", desc=True)\
-            .limit(1)\
-            .execute().data
-
-        if not last_entr:
-            st.warning("⚠️ Aucun entraînement trouvé pour cet utilisateur.")
-            return
-
-        entrainement_id = last_entr[0]["id"]
-
-        # 🔹 On essaie de récupérer une première observation
-        first_obs = supabase.table("Observations")\
+        st.write("[DEBUG] Initialisation du premier suivi")
+        first_parcours = supabase.table("Parcours")\
             .select("id")\
             .order("id")\
             .limit(1)\
             .execute().data
-
-        first_obs_id = first_obs[0]["id"] if first_obs else None
-
-        # 🔵 Insertion même sans observation
-        supabase.table("Suivi_Parcours").insert({
-            "Users_Id": user_id,
-            "Parcours_Id": parcours_id,
-            "Date": datetime.now().strftime("%Y-%m-%d"),
-            "Taux_Reussite": 0,
-            "Type_Evolution": "initialisation",
-            "Derniere_Observation_Id": first_obs_id
-        }).execute()
-
-        st.success("✅ Suivi initialisé même sans observation")
-
-        st.success("✅ Suivi initial inséré avec succès")
+        if first_parcours:
+            parcours_id = first_parcours[0]["id"]
+            supabase.table("Suivi_Parcours").insert({
+                "Users_Id": user_id,
+                "Parcours_Id": parcours_id,
+                "Date": datetime.now().strftime("%Y-%m-%d"),
+                "Taux_Reussite": 0,
+                "Type_Evolution": "initialisation",
+                "Derniere_Observation_Id": last_obs_id or 0
+            }).execute()
         return
 
-    # 3️⃣ Cas normal : un suivi existe → analyse de progression
     parcours_id = last_suivi[0]["Parcours_Id"]
     last_obs_used = last_suivi[0]["Derniere_Observation_Id"]
 
-    # 4️⃣ Récupérer le critère du niveau actuel
+    # 3️⃣ Récupérer le critère
     parcours_data = supabase.table("Parcours")\
         .select("Critere")\
         .eq("id", parcours_id)\
         .execute().data
     if not parcours_data:
         return
-    critere = parcours_data[0]["Critere"]
+    critere_initial = parcours_data[0]["Critere"]
 
-    # 5️⃣ Récupérer les nouvelles observations
+    # 4️⃣ Récupérer toutes les nouvelles observations depuis le dernier suivi
     observations = supabase.table("Observations")\
         .select("id,Etat")\
         .gt("id", last_obs_used)\
         .execute().data
 
     total_obs = len(observations)
-    st.write(f"[DEBUG] Nouvelles observations trouvées : {total_obs}")
+    st.write(f"[DEBUG] Total nouvelles observations : {total_obs}")
 
-    if total_obs < critere:
-        st.write("[DEBUG] Pas encore assez de données pour une évaluation.")
+    if total_obs < critere_initial:
+        st.write("[DEBUG] Pas encore assez de données pour évaluer le test.")
         return
 
-    # 6️⃣ Calcul du taux de réussite
-    selection = observations[-critere:]
+    # 5️⃣ Calcul du taux de réussite
+    selection = observations[-critere_initial:]
     nb_bonnes = sum(1 for obs in selection if obs["Etat"] == "VRAI")
-    taux = round(nb_bonnes / critere, 2)
+    taux = round(nb_bonnes / critere_initial, 2)
     st.write(f"[DEBUG] Taux de réussite : {taux}")
 
-    # 7️⃣ Déterminer l'évolution
+    # 6️⃣ Déterminer évolution
     evolution = "stagnation"
     if taux >= 0.8:
         evolution = "progression"
@@ -356,7 +349,7 @@ def analyser_progression(user_id, last_obs_id=None, parcours_id=None):
         if prev_parcours:
             parcours_id = prev_parcours[0]["id"]
 
-    # 8️⃣ Insérer un nouveau suivi
+    # 7️⃣ Insérer le suivi mis à jour
     supabase.table("Suivi_Parcours").insert({
         "Users_Id": user_id,
         "Parcours_Id": parcours_id,
@@ -366,7 +359,7 @@ def analyser_progression(user_id, last_obs_id=None, parcours_id=None):
         "Derniere_Observation_Id": last_obs_id
     }).execute()
 
-    st.write(f"[DEBUG] Nouveau suivi enregistré ({evolution}) — niveau {parcours_id}")
+    st.write(f"[DEBUG] Test critique enregistré : {evolution.upper()} — nouvelle position {parcours_id}")
 
 def get_classement(limit=None):
     users = supabase.table("Users").select("id,name").execute().data or []
@@ -410,7 +403,9 @@ def render_monstre_progress(score, mask):
     img = Image.fromarray(img).resize((grid_size*2, grid_size*2), Image.NEAREST)
     return img
 
+
 # --------------------- GPT QCM ---------------------
+
 
 def generate_mental_calculation(user_id: int, nb_questions: int = 5):
     """
@@ -484,6 +479,7 @@ def generate_questions(n):
         parcours["sujet"], parcours["Lecon"], parcours["niveau"]
     ))]
 
+
 # --------------------- LOGIQUE QCM ---------------------
 
 def log_responses_to_supabase():
@@ -499,60 +495,33 @@ def log_responses_to_supabase():
     user_id = st.session_state.user["id"]
     nb_q = len(st.session_state.answers)
 
-    # 🔁 Si aucun suivi, créer une première ligne avec analyser_progression()
-    suivi_existe = supabase.table("Suivi_Parcours")\
-        .select("id")\
-        .eq("Users_Id", user_id)\
-        .limit(1)\
-        .execute().data
-
-    if not suivi_existe:
-        st.write("DEBUG: Aucun suivi trouvé, tentative d'initialisation avec analyser_progression()")
-        try:
-            last_obs_id = supabase.table("Observations") \
-                .select("id") \
-                .order("id") \
-                .limit(1) \
-                .execute().data[0]["id"]
-
-            analyser_progression(user_id, last_obs_id)
-        except Exception as e:
-            st.warning(f"⚠️ Erreur lors de l'initialisation du suivi : {e}")
-
-    # ✅ Récupérer le parcours actuel (niveau)
-    parcours = get_position_actuelle(user_id)
-    if not parcours:
-        st.error("❌ Impossible de récupérer le parcours de l'utilisateur.")
-        return
-
-    parcours_id = parcours["id"]
-    st.write("DEBUG parcours_id =", parcours_id)
-
-    # 1️⃣ Créer un nouvel Entrainement avec Parcours_Id
+    # 1️⃣ Créer un nouvel Entrainement
     entr = supabase.table("Entrainement").insert({
         "Users_Id": user_id,
         "Date": now.strftime("%Y-%m-%d"),
         "Time": now.strftime("%H:%M"),
-        "Volume": nb_q,
-        "Parcours_Id": parcours_id
+        "Volume": nb_q
     }).execute()
 
     st.write("DEBUG Entrainement insert:", entr.data)
 
+    # 2️⃣ Vérifie que la ligne a bien été créée
     if not entr.data:
         st.error("❌ Impossible de créer un entraînement dans Supabase")
         return
 
     entrainement_id = entr.data[0]["id"]
 
-    # 3️⃣ Vérifie que l'entraînement est bien en base
+    # 3️⃣ Confirme qu'elle existe vraiment dans la DB
     exists = supabase.table("Entrainement").select("id").eq("id", entrainement_id).execute()
+    st.write("DEBUG Vérification Entrainement existe:", exists.data)
+
     if not exists.data:
         st.error("❌ Entrainement introuvable dans la base")
         return
 
-    # 4️⃣ Création des observations
-    observations_data = []
+    # 4️⃣ Construction des Observations
+    observations_data = []  # ✅ doit être toujours défini avant la boucle
 
     for entry in st.session_state.answers:
         is_correct = entry["is_correct"]
@@ -563,6 +532,7 @@ def log_responses_to_supabase():
         correction = "OUI" if entry.get("corrected", False) else "NON"
         operation_str = entry["question"]
 
+        # Extraction des opérateurs (ex : "7 x 8")
         try:
             parts = operation_str.split()
             operateur_un = int(parts[0])
@@ -572,7 +542,7 @@ def log_responses_to_supabase():
             operateur_deux = None
 
         observations_data.append({
-            "Entrainement_Id": entrainement_id,
+            "Entrainement_Id": entrainement_id,  # ✅ clé étrangère correcte
             "Operateur_Un": operateur_un,
             "Operateur_Deux": operateur_deux,
             "Operation": operation_str,
@@ -581,14 +551,16 @@ def log_responses_to_supabase():
             "Score": score
         })
 
+    # 5️⃣ Debug : Vérifie les données à insérer
     st.write("DEBUG Observations à insérer:", observations_data)
 
+    # 6️⃣ Insertion dans Observations (si données valides)
     if observations_data:
         supabase.table("Observations").insert(observations_data).execute()
     else:
         st.warning("⚠️ Aucune observation à insérer")
 
-    # 7️⃣ Appel à analyser_progression()
+    # 7️⃣ Appelle l’analyse de progression
     try:
         last_obs_id = supabase.table("Observations") \
             .select("id") \
@@ -596,7 +568,7 @@ def log_responses_to_supabase():
             .limit(1) \
             .execute().data[0]["id"]
 
-        analyser_progression(user_id, last_obs_id, parcours_id)
+        analyser_progression(user_id, last_obs_id)
     except Exception as e:
         st.warning(f"⚠️ Analyse de progression impossible : {e}")
 
@@ -614,19 +586,6 @@ def home_page():
         return
 
     user_id = user["id"]
-
-    # 🆕 S'assurer qu'un suivi existe pour cet utilisateur
-    existing_suivi = supabase.table("Suivi_Parcours") \
-        .select("id") \
-        .eq("Users_Id", user_id) \
-        .limit(1) \
-        .execute().data
-
-    if not existing_suivi:
-        st.write("DEBUG: Aucun suivi trouvé — appel à analyser_progression() pour initialiser.")
-        analyser_progression(user_id)
-
-    # 📍 Une fois le suivi assuré, on peut récupérer la position actuelle
     total_score = get_user_total_score(user_id)
     position = get_position_actuelle(user_id)
     streak = get_user_streak(user_id)
