@@ -4,6 +4,8 @@ import os
 import random
 import bcrypt
 import hashlib
+import time
+import pandas as pd
 from PIL import Image
 import numpy as np
 from openai import OpenAI
@@ -509,8 +511,6 @@ def analyser_progression(user_id, last_obs_id=None, parcours_id=None, type_opera
 
     st.write(f"[DEBUG] {type_operation}: suivi enregistré ({evolution}) — nouveau parcours {next_parcours_id}")
 
-
-
 def get_classement(limit=None):
     users = supabase.table("Users").select("id,name").execute().data or []
     if not users:
@@ -528,6 +528,11 @@ def get_classement(limit=None):
     classement.sort(key=lambda x: x[2], reverse=True)
     return classement[:limit] if limit else classement
 
+def _infer_type_from_operation(op_str: str) -> str:
+    if " + " in op_str or "+" in op_str: return "Addition"
+    if " - " in op_str or "-" in op_str: return "Soustraction"
+    if " * " in op_str or "*" in op_str: return "Multiplication"
+    return "Addition"
 # --------------------- PIXEL MONSTRE ---------------------
 
 @st.cache_data
@@ -555,50 +560,54 @@ def render_monstre_progress(score, mask):
 
 # --------------------- GPT QCM ---------------------
 
-def generate_mental_calculation(user_id: int, nb_questions: int = 5):
-    st.write("DEBUG: generate_mental_calculation() par type ✅")
+def generate_mental_calculation(user_id: int, nb_questions_per_type: int):
+    """
+    Génère nb_questions_per_type additions, soustractions et multiplications
+    en fonction du parcours actuel de l'utilisateur pour chaque type d'opération.
+    Retourne une liste mélangée de questions, chaque question = {operation, solution}.
+    """
+    all_questions = []
 
-    types = ["Addition", "Soustraction", "Multiplication"]
-    symbol_map = {"Addition": "+", "Soustraction": "-", "Multiplication": "*"}
-
-    questions = []
-
-    for type_op in types:
-        pos = get_position_actuelle(user_id, type_op)
-        if not pos:
-            st.warning(f"Aucun parcours trouvé pour {type_op} — il sera initialisé si besoin.")
+    # On gère les 3 types séparément
+    for type_op in ["Addition", "Soustraction", "Multiplication"]:
+        # Récupère la position actuelle pour ce type
+        parcours_info = get_position_actuelle(user_id, type_op)
+        if not parcours_info:
+            st.error(f"❌ Aucun parcours disponible pour {type_op}")
             continue
 
-        try:
-            op1_min = pos["Operateur1_Min"]
-            op1_max = pos["Operateur1_Max"]
-            op2_min = pos["Operateur2_Min"]
-            op2_max = pos["Operateur2_Max"]
-        except KeyError as e:
-            st.error(f"Clé manquante dans Parcours ({type_op}) : {e}")
-            continue
+        op1_min = parcours_info.get("Operateur1_Min", 0)
+        op1_max = parcours_info.get("Operateur1_Max", 10)
+        op2_min = parcours_info.get("Operateur2_Min", 0)
+        op2_max = parcours_info.get("Operateur2_Max", 10)
 
-        operateur = symbol_map[type_op]
-        for _ in range(nb_questions):
-            op1 = random.randint(op1_min, op1_max)
-            op2 = random.randint(op2_min, op2_max)
+        # Génération des N questions pour ce type
+        for _ in range(nb_questions_per_type):
+            a = random.randint(op1_min, op1_max)
+            b = random.randint(op2_min, op2_max)
 
-            if operateur == "+":
-                solution = op1 + op2
-            elif operateur == "-":
-                solution = op1 - op2
+            if type_op == "Addition":
+                op_str = f"{a} + {b}"
+                sol = a + b
+            elif type_op == "Soustraction":
+                op_str = f"{a} - {b}"
+                sol = a - b
+            elif type_op == "Multiplication":
+                op_str = f"{a} * {b}"
+                sol = a * b
             else:
-                solution = op1 * op2
+                continue
 
-            questions.append({
-                "operation": f"{op1} {operateur} {op2}",
-                "solution": solution,
+            all_questions.append({
+                "operation": op_str,
+                "solution": sol,
                 "type_operation": type_op
             })
 
-    random.shuffle(questions)
-    st.write("DEBUG: Total questions générées =", len(questions))
-    return questions
+    # Mélanger toutes les questions pour ne pas grouper par type
+    random.shuffle(all_questions)
+    st.write(f"DEBUG: Total questions générées = {len(all_questions)}")
+    return all_questions
 
 def save_mental_exercise(exo, parcours_id):
     """
@@ -637,7 +646,7 @@ def log_responses_to_supabase():
     user_id = st.session_state.user["id"]
     nb_q = len(st.session_state.answers)
 
-    # 1) Créer un Entrainement (Parcours_Id = NULL car multi-parcours)
+    # 1) Créer l'entraînement (multi-parcours → Parcours_Id NULL)
     entr = supabase.table("Entrainement").insert({
         "Users_Id": user_id,
         "Date": now.strftime("%Y-%m-%d"),
@@ -650,20 +659,19 @@ def log_responses_to_supabase():
         return
     entrainement_id = entr.data[0]["id"]
 
-    # 2) Préparer mapping Type -> Parcours courant
+    # 2) Mapping Type -> Parcours courant
     parcours_by_type = {}
     for type_op in ["Addition", "Soustraction", "Multiplication"]:
         pos = get_position_actuelle(user_id, type_op)
-        # si pas de suivi encore (rare grâce à ensure_initial_suivi), pos peut être None
         parcours_by_type[type_op] = pos["id"] if pos else None
 
-    # 3) Construire Observations (avec Parcours_Id)
+    # 3) Construire Observations (avec temps & marge)
     observations_data = []
     obs_by_type = {"Addition": [], "Soustraction": [], "Multiplication": []}
 
     for entry in st.session_state.answers:
         op_str = entry["question"]
-        type_op = _infer_type_from_operation(op_str)
+        type_op = entry.get("type_operation") or _infer_type_from_operation(op_str)
         parcours_id_for_obs = parcours_by_type.get(type_op)
 
         is_correct = entry["is_correct"]
@@ -673,6 +681,10 @@ def log_responses_to_supabase():
         etat = "VRAI" if (is_correct or first_try_correction) else "FAUX"
         correction = "OUI" if entry.get("corrected", False) else "NON"
 
+        # Temps & marge
+        temps_seconds = int(entry.get("elapsed", 0))
+        marge_erreur = int(entry.get("error_margin", 0))
+
         try:
             parts = op_str.split()
             operateur_un = int(parts[0]); operateur_deux = int(parts[2])
@@ -681,13 +693,15 @@ def log_responses_to_supabase():
 
         obs = {
             "Entrainement_Id": entrainement_id,
-            "Parcours_Id": parcours_id_for_obs,   # <-- NOUVEAU
+            "Parcours_Id": parcours_id_for_obs,
             "Operateur_Un": operateur_un,
             "Operateur_Deux": operateur_deux,
             "Operation": op_str,
             "Etat": etat,
             "Correction": correction,
-            "Score": score
+            "Score": score,
+            "Temps_Seconds": temps_seconds,     # <-- NOUVEAU
+            "Marge_Erreur": marge_erreur        # <-- NOUVEAU
         }
         observations_data.append(obs)
         obs_by_type[type_op].append(obs)
@@ -697,8 +711,7 @@ def log_responses_to_supabase():
     else:
         st.warning("⚠️ Aucune observation à insérer")
 
-    # 4) Progression par type (on prend le last_obs_id de l'entraînement,
-    #    et on appelle analyser_progression pour chaque type concerné)
+    # 4) Appels progression par type
     last_obs_row = (
         supabase.table("Observations")
         .select("id")
@@ -733,123 +746,163 @@ def home_page():
 
     user_id = user["id"]
 
-    # --- DEBUG SONDE SUPABASE ---
-    try:
-        sonde = (
-            supabase.table("Parcours")
-            .select("id,Type_Operation,Niveau")
-            .limit(5)
-            .execute()
-            .data
-        )
-        st.write("[SONDE] Parcours (top 5) vus par l'appli:", sonde)
-
-        types_distincts = (
-            supabase.table("Parcours")
-            .select("Type_Operation")
-            .execute()
-            .data
-        )
-        st.write("[SONDE] Types vus par l'appli:", types_distincts)
-    except Exception as e:
-        st.error(f"[SONDE] Erreur lecture Parcours: {e}")
-    # --- FIN SONDE ---
-
-    # 🧰 Initialisation sûre : créer les 3 suivis si absents
+    # S'assurer que les 3 suivis existent
     try:
         ensure_initial_suivi(user_id)
     except Exception as e:
-        st.error(f"Erreur lors de l'initialisation du suivi : {e}")
+        st.error(f"Erreur d'initialisation du suivi : {e}")
         return
 
-    # 📊 Stats utilisateur
+    # Stats globales
     total_score = get_user_total_score(user_id)
     streak = get_user_streak(user_id)
 
-    # 📍 Récupérer les niveaux actuels par type
-    position_add = get_position_actuelle(user_id, "Addition")
-    position_sous = get_position_actuelle(user_id, "Soustraction")
-    position_mult = get_position_actuelle(user_id, "Multiplication")
+    # Header
+    st.title(f"Bienvenue, {user.get('name','Utilisateur')} 👋")
 
-    niveau_add = position_add["Niveau"] if position_add and "Niveau" in position_add else "—"
-    niveau_sous = position_sous["Niveau"] if position_sous and "Niveau" in position_sous else "—"
-    niveau_mult = position_mult["Niveau"] if position_mult and "Niveau" in position_mult else "—"
+    # Pixel en haut
+    try:
+        mask = load_monstre_mask("monstre.png")
+        pixel_image = render_monstre_progress(int(total_score), mask)
+        st.image(pixel_image, caption=f"{total_score} / {mask.sum()} pixels allumés", use_container_width=True)
+    except Exception as e:
+        st.warning(f"Impossible d'afficher le monstre : {e}")
 
-    st.title(f"Bienvenue, {user.get('name', 'Utilisateur')} 👋")
-    st.markdown(f"### 🏆 Score cumulé : **{total_score}** points")
-    st.markdown(f"### 🔥 Série en cours : **{streak}** jours")
-
-    st.subheader("📚 Niveaux actuels par opération")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown(f"**Addition**<br/>Niveau : **{niveau_add}**", unsafe_allow_html=True)
-        if position_add:
-            st.caption(f"BORNES: {position_add.get('Operateur1_Min','?')}-{position_add.get('Operateur1_Max','?')} et {position_add.get('Operateur2_Min','?')}-{position_add.get('Operateur2_Max','?')}")
-    with c2:
-        st.markdown(f"**Soustraction**<br/>Niveau : **{niveau_sous}**", unsafe_allow_html=True)
-        if position_sous:
-            st.caption(f"BORNES: {position_sous.get('Operateur1_Min','?')}-{position_sous.get('Operateur1_Max','?')} et {position_sous.get('Operateur2_Min','?')}-{position_sous.get('Operateur2_Max','?')}")
-    with c3:
-        st.markdown(f"**Multiplication**<br/>Niveau : **{niveau_mult}**", unsafe_allow_html=True)
-        if position_mult:
-            st.caption(f"BORNES: {position_mult.get('Operateur1_Min','?')}-{position_mult.get('Operateur1_Max','?')} et {position_mult.get('Operateur2_Min','?')}-{position_mult.get('Operateur2_Max','?')}")
-
-    st.subheader("Combien de questions veux-tu faire aujourd’hui ?")
-    col1, col2, col3 = st.columns(3)
+    # 2 boutons principaux
+    st.markdown("### ")
+    col1, col2 = st.columns(2)
     with col1:
-        if st.button("5 questions"):
-            st.session_state.nb_questions = 5
-            start_new_training()
+        if st.button("🏋️ Entraînement", use_container_width=True):
+            st.session_state.page = "training_lobby"
+            st.rerun()
     with col2:
-        if st.button("10 questions"):
-            st.session_state.nb_questions = 10
-            start_new_training()
-    with col3:
-        if st.button("50 questions"):
-            st.session_state.nb_questions = 50
-            start_new_training()
+        if st.button("📈 Progression", use_container_width=True):
+            st.session_state.page = "progression"
+            st.rerun()
 
-    st.subheader("🧩 Ton Pixel-Monstre")
-    if "pixel_image" not in st.session_state:
-        try:
-            mask = load_monstre_mask("monstre.png")
-            st.session_state.pixel_image = render_monstre_progress(int(total_score), mask)
-            st.session_state.pixel_caption = f"{total_score} / {mask.sum()} pixels allumés"
-        except Exception as e:
-            st.warning(f"Impossible d'afficher le monstre : {e}")
+    # Petit pied de page
+    st.markdown("### ")
+    c1, c2 = st.columns(2)
+    c1.metric("🔥 Série (jours)", streak)
+    c2.metric("🏆 Score cumulé", total_score)
 
-    if "pixel_image" in st.session_state:
-        st.image(
-            st.session_state.pixel_image,
-            caption=st.session_state.pixel_caption,
-            use_container_width=True
-        )
+    st.markdown("---")
+    if st.button("Se déconnecter"):
+        st.session_state.clear()
+        st.session_state.page = "login"
 
-    colA, colB = st.columns(2)
-    with colA:
-        if st.button("🏆 Voir le classement"):
-            st.session_state.page = "classement"
-    with colB:
-        if st.button("Se déconnecter"):
-            st.session_state.clear()
-            st.session_state.page = "login"
+def _get_scores_by_type(user_id: int):
+    """
+    Additionne Observations.Score par type d'opération pour l'utilisateur.
+    Ne compte QUE les observations rattachées à un Parcours_Id (donc typées).
+    """
+    # 1) Tous les entraînements de l'utilisateur
+    entr_rows = (
+        supabase.table("Entrainement")
+        .select("id")
+        .eq("Users_Id", user_id)
+        .execute()
+        .data or []
+    )
+    if not entr_rows:
+        return {"Addition": 0, "Soustraction": 0, "Multiplication": 0}
+    entr_ids = [e["id"] for e in entr_rows]
+
+    # 2) Observations avec leurs Parcours_Id
+    obs_rows = (
+        supabase.table("Observations")
+        .select("Score,Parcours_Id")
+        .in_("Entrainement_Id", entr_ids)
+        .execute()
+        .data or []
+    )
+
+    # Filtrer celles qui n'ont pas (encore) de Parcours_Id
+    obs_rows = [o for o in obs_rows if o.get("Parcours_Id")]
+
+    if not obs_rows:
+        return {"Addition": 0, "Soustraction": 0, "Multiplication": 0}
+
+    # 3) Charger les types pour ces Parcours_Id
+    pids = sorted({o["Parcours_Id"] for o in obs_rows})
+    p_rows = (
+        supabase.table("Parcours")
+        .select("id,Type_Operation")
+        .in_("id", pids)
+        .execute()
+        .data or []
+    )
+    type_by_pid = {p["id"]: p["Type_Operation"] for p in p_rows}
+
+    # 4) Agréger par type
+    out = {"Addition": 0, "Soustraction": 0, "Multiplication": 0}
+    for o in obs_rows:
+        t = type_by_pid.get(o["Parcours_Id"])
+        if t in out:
+            out[t] += o.get("Score", 0)
+
+    return out
+
+def training_lobby_page():
+    user = st.session_state.get("user")
+    if not user:
+        st.warning("⚠️ Non connecté.")
+        st.session_state.page = "login"; st.rerun(); return
+    user_id = user["id"]
+
+    st.title("Préparer l'entraînement")
+
+    # Positions actuelles par type
+    pos_add = get_position_actuelle(user_id, "Addition")
+    pos_sou = get_position_actuelle(user_id, "Soustraction")
+    pos_mul = get_position_actuelle(user_id, "Multiplication")
+
+    niveau_add = pos_add.get("Niveau") if pos_add else "—"
+    niveau_sou = pos_sou.get("Niveau") if pos_sou else "—"
+    niveau_mul = pos_mul.get("Niveau") if pos_mul else "—"
+
+    # Scores par type
+    scores = _get_scores_by_type(user_id)
+
+    # Tableau récap (simple, MVP)
+    st.subheader("Position dans le parcours")
+    import pandas as pd
+    df = pd.DataFrame([
+        {"Opération": "Addition",       "Niveau": niveau_add, "Score": scores.get("Addition", 0)},
+        {"Opération": "Soustraction",   "Niveau": niveau_sou, "Score": scores.get("Soustraction", 0)},
+        {"Opération": "Multiplication", "Niveau": niveau_mul, "Score": scores.get("Multiplication", 0)},
+    ])
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    st.markdown("### ")
+    st.markdown("#### Nombre d'opérations par type")
+    nb = st.radio("Sélection rapide :", [10, 50, 100], index=0, horizontal=True, label_visibility="collapsed")
+
+    st.caption("Ce nombre s'applique à chaque type (Addition, Soustraction, Multiplication).")
+
+    st.markdown("### ")
+    if st.button("CALCULEZ !", use_container_width=True):
+        st.session_state.nb_questions = int(nb)        # utilisé par generate_mental_calculation(user_id, nb)
+        start_new_training()                           # initialise l'état et route vers mental_calc
+        st.rerun()
+
+    st.markdown("---")
+    if st.button("⬅️ Retour"):
+        st.session_state.page = "home"
+        st.rerun()
 
 def mental_calc_page():
     st.title("Entraînement de calcul mental 🔢")
 
-    # 1️⃣ Vérification et debug de l'utilisateur
     user_id = st.session_state.get("user_id")
-    st.write("DEBUG user_id =", user_id)  # 👈 debug temporaire
-
     if not user_id:
         st.error("⚠️ Vous devez être connecté pour commencer un entraînement.")
-        st.session_state.page = "login"  # Optionnel : redirige vers login
-        st.stop()  # Stoppe la page pour éviter l'erreur 22P02
+        st.session_state.page = "login"
+        st.stop()
 
-    # 2️⃣ Récupération du nombre de questions choisi
     nb_questions = st.session_state.get("nb_questions", 5)
 
-    # 3️⃣ Initialisation de la session pour cet entraînement
+    # 1) Init de la session d'entraînement
     if "questions" not in st.session_state or not st.session_state.questions:
         questions = generate_mental_calculation(user_id, nb_questions)
         st.session_state.questions = questions
@@ -857,12 +910,12 @@ def mental_calc_page():
         st.session_state.answers = []
         st.session_state.correct = 0
         st.session_state.score = 0
+        st.session_state.q_start = time.time()  # ← départ chrono
 
-    # 4️⃣ Gestion des questions
     questions = st.session_state.questions
     q_index = st.session_state.current_q
 
-    # Si toutes les questions ont été traitées → page résultats
+    # 2) Fin → page résultats
     if q_index >= len(questions):
         st.session_state.page = "result"
         st.rerun()
@@ -872,73 +925,195 @@ def mental_calc_page():
     st.subheader(f"Question {q_index + 1} / {len(questions)}")
     st.markdown(f"**{q['operation']} = ?**")
 
+    # 3) Chronomètre (se met à jour à chaque re-run)
+    if "q_start" not in st.session_state:
+        st.session_state.q_start = time.time()
+    elapsed = int(time.time() - st.session_state.q_start)
+    st.markdown(f"⏱️ Temps écoulé : **{elapsed}s**")
+
+    # 4) Saisie + validation
     user_answer = st.text_input("Ta réponse :", key=f"answer_{q_index}")
 
-    # 5️⃣ Validation de la réponse
     if st.button("Valider"):
         try:
-            is_correct = int(user_answer) == q["solution"]
+            ua = int(user_answer)
+            is_correct = ua == q["solution"]
+            marge = abs(ua - int(q["solution"]))  # ← marge d’erreur absolue
         except ValueError:
             st.warning("Entre un nombre valide.")
             return
 
-        # On enregistre la réponse
+        # On enregistre la réponse avec temps & marge
         st.session_state.answers.append({
             "question": q["operation"],
             "user_answer": user_answer,
             "correct_answer": q["solution"],
             "is_correct": is_correct,
-            "corrected": False
+            "corrected": False,
+            "elapsed": elapsed,                    # ← TEMPS
+            "error_margin": marge,                 # ← MARGE
+            "type_operation": _infer_type_from_operation(q["operation"])
         })
 
-        # Passer à la question suivante
+        # Passer à la suivante & reset chrono
         st.session_state.current_q += 1
+        st.session_state.q_start = time.time()     # ← reset chrono
         st.rerun()
 
 def result_page():
-    st.title("Résultats de l'entraînement 🧠")
+    import math
+    st.markdown("""
+    <style>
+      .wrap {max-width: 640px; margin: 0 auto;}
+      .score-card{
+        background:#e9ecef;border-radius:16px;padding:14px 16px;
+        display:flex;align-items:center;justify-content:space-between;
+        font-weight:700;color:#263238;margin-bottom:12px;
+      }
+      .score-badge{background:#d1d9e6;border-radius:12px;padding:6px 10px;}
+      .score-value{color:#22c55e;font-size:22px;}
+      .section{
+        background:#f7f7f8;border-radius:18px;padding:16px 16px;margin:12px 0; box-shadow: 0 1px 0 rgba(0,0,0,0.03) inset;
+      }
+      .section h3{margin:0 0 10px 0;color:#1f2937;}
+      .row{display:flex;align-items:center;gap:12px;margin:10px 0;}
+      .label{
+        background:#dbe7ff;color:#0f172a;border-radius:999px;padding:6px 10px;font-weight:600;white-space:nowrap;
+      }
+      .bar{flex:1; height:28px; background:#ffffff; border-radius:999px; position:relative; overflow:hidden; border:1px solid #e5e7eb;}
+      .fill{position:absolute; left:0; top:0; bottom:0; width:0%; background:#b3ccff;}
+      .value{
+        position:absolute; right:10px; top:50%; transform:translateY(-50%);
+        font-weight:700; color:#1f2937;
+      }
+      .btn-primary{
+        display:block; width:100%; text-align:center; background:#f59e0b; color:#111827;
+        border:none; padding:12px 14px; border-radius:999px; font-weight:800; cursor:pointer; margin-top:8px;
+      }
+      .pill {border-radius:10px; padding:4px 8px; background:#fff; border:1px solid #e5e7eb;}
+    </style>
+    """, unsafe_allow_html=True)
 
-    total = len(st.session_state.questions)
-    correct = sum(1 for a in st.session_state.answers if a["is_correct"])
-    st.info(f"Tu as {correct} / {total} bonnes réponses.")
+    # -------- Data prep ----------
+    answers = st.session_state.get("answers", [])
+    total = len(answers)
+    # correct = 1 si bonne réponse OU correction au 1er essai (si flag présent)
+    def corr(a): return 1 if (a.get("is_correct") or a.get("first_try_correction")) else 0
+    score_net = sum(1 if corr(a) else -1 for a in answers)  # même logique que l’insertion Observations
 
-    # 1️⃣ Affichage des réponses
-    for entry in st.session_state.answers:
-        st.markdown(f"**Opération :** {entry['question']}")
-        st.markdown(f"👉 Ta réponse : `{entry['user_answer']}`")
+    # Regroupe par type
+    types = ["Addition", "Soustraction", "Multiplication"]
+    grouped = {t: [] for t in types}
+    for a in answers:
+        t = a.get("type_operation") or _infer_type_from_operation(a["question"])
+        if t in grouped: grouped[t].append(a)
 
-        if entry["is_correct"]:
-            st.success("✅ Bonne réponse")
-        else:
-            st.error(f"❌ Mauvaise réponse. La bonne réponse était `{entry['correct_answer']}`")
+    # Pour chaque type: taux, temps moyen, marge moyenne (%)
+    stats = {}
+    # temps et marge servent aussi pour normaliser les barres (visuel)
+    all_avg_times = []
+    for t in types:
+        rows = grouped[t]
+        n = len(rows)
+        if n == 0:
+            stats[t] = {"acc": 0, "avg_time": 0.0, "avg_margin_pct": 0.0}
+            continue
+        acc = round(100 * (sum(corr(a) for a in rows) / n))
+        # temps moyen
+        avg_time = sum(int(a.get("elapsed", 0)) for a in rows) / max(1, n)
+        all_avg_times.append(avg_time)
+        # marge: % relative à la bonne réponse quand possible
+        margins = []
+        for a in rows:
+            try:
+                correct_val = float(a.get("correct_answer"))
+                err = float(a.get("error_margin", 0))
+                if correct_val != 0:
+                    margins.append(100.0 * err / abs(correct_val))
+                else:
+                    margins.append(0.0 if err == 0 else 100.0)
+            except Exception:
+                margins.append(float(a.get("error_margin", 0)))
+        avg_margin_pct = sum(margins) / max(1, len(margins))
+        stats[t] = {
+            "acc": int(acc),
+            "avg_time": round(avg_time, 2),
+            "avg_margin_pct": round(avg_margin_pct, 2)
+        }
 
-        st.markdown("---")
+    # Normalisation visuelle des barres "temps" (plus le temps est grand, plus la barre est longue)
+    max_time = max(all_avg_times) if all_avg_times else 1.0
 
-    # 2️⃣ Boutons de navigation
+    def section_block(title, acc, avg_time, avg_margin):
+        # acc et avg_margin sont des % entre 0 et 100
+        acc_fill = max(0, min(100, acc))
+        margin_fill = max(0, min(100, avg_margin))
+        time_ratio = 0 if max_time == 0 else (avg_time / max_time)
+        time_fill = max(0, min(100, int(round(100 * time_ratio))))
+
+        st.markdown(f"""
+            <div class="section">
+              <h3>{title}</h3>
+
+              <div class="row">
+                <div class="label">Taux de Réussite</div>
+                <div class="bar">
+                  <div class="fill" style="width:{acc_fill}%"></div>
+                  <div class="value">{acc} %</div>
+                </div>
+              </div>
+
+              <div class="row">
+                <div class="label">Temps par Opération</div>
+                <div class="bar">
+                  <div class="fill" style="width:{time_fill}%"></div>
+                  <div class="value">{avg_time} sec</div>
+                </div>
+              </div>
+
+              <div class="row">
+                <div class="label">Marge Erreur</div>
+                <div class="bar">
+                  <div class="fill" style="width:{margin_fill}%"></div>
+                  <div class="value">{avg_margin:.0f} %</div>
+                </div>
+              </div>
+            </div>
+        """, unsafe_allow_html=True)
+
+    # -------- UI ----------
+    st.markdown('<div class="wrap">', unsafe_allow_html=True)
+
+    # Score net
+    st.markdown(f"""
+      <div class="score-card">
+        <div class="score-badge">Score Net</div>
+        <div class="score-value">{"+" if score_net>=0 else ""}{score_net}</div>
+      </div>
+    """, unsafe_allow_html=True)
+
+    # Sections
+    section_block("Addition", stats["Addition"]["acc"], stats["Addition"]["avg_time"], stats["Addition"]["avg_margin_pct"])
+    section_block("Soustraction", stats["Soustraction"]["acc"], stats["Soustraction"]["avg_time"], stats["Soustraction"]["avg_margin_pct"])
+    section_block("Multiplication", stats["Multiplication"]["acc"], stats["Multiplication"]["avg_time"], stats["Multiplication"]["avg_margin_pct"])
+
+    # Boutons
+    # On enregistre l'entraînement ici si ce n'est pas déjà fait, avant de repartir
     col1, col2 = st.columns(2)
-
     with col1:
+        if st.button("CORRECTION"):
+            st.session_state.page = "correction"
+            st.rerun()
+    with col2:
         if st.button("Retour à l'accueil"):
-            # ⚡ On log les réponses immédiatement
+            # log + reset comme avant
             log_responses_to_supabase()
-            # ⚡ On reset la session sauf les réponses
             for k in ["questions", "current_q", "correct", "nb_questions", "score"]:
                 st.session_state.pop(k, None)
-            # ⚡ On change la page et on relance
             st.session_state.page = "home"
             st.rerun()
 
-    with col2:
-        mistakes_exist = any(not a["is_correct"] for a in st.session_state.answers)
-        if mistakes_exist and st.button("Corriger mes erreurs"):
-            # ⚡ On ne reset rien, pour garder answers
-            st.session_state.page = "correction"
-            st.rerun()
-
-def _reset_session():
-    """Nettoyage de la session pour une prochaine partie"""
-    for k in ["questions", "current_q", "correct", "answers", "nb_questions", "score"]:
-        st.session_state.pop(k, None)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 def correction_page():
     st.title("Correction interactive des erreurs 🛠️")
@@ -1015,6 +1190,75 @@ def correction_page():
             st.session_state.page = "home"
             st.rerun()
 
+def analyse_page():
+    st.title("Analyse de progression 📈")
+
+    # Relecture du dernier entraînement de l'utilisateur
+    user = st.session_state.get("user")
+    if not user:
+        st.warning("Non connecté")
+        st.session_state.page = "login"; st.rerun(); return
+    user_id = user["id"]
+
+    last_entr = (
+        supabase.table("Entrainement")
+        .select("id, Date, Time, Volume")
+        .eq("Users_Id", user_id)
+        .order("id", desc=True)
+        .limit(1)
+        .execute().data
+    )
+    if not last_entr:
+        st.info("Aucun entraînement à analyser.")
+        return
+
+    entr_id = last_entr[0]["id"]
+    st.caption(f"Dernier entraînement #{entr_id} — {last_entr[0]['Date']} {last_entr[0]['Time']}")
+
+    obs = (
+        supabase.table("Observations")
+        .select("Operation, Etat, Temps_Seconds, Marge_Erreur, Parcours_Id")
+        .eq("Entrainement_Id", entr_id)
+        .execute().data or []
+    )
+    if not obs:
+        st.info("Aucune observation pour cet entraînement.")
+        return
+
+    df = pd.DataFrame(obs)
+        # Cast des métriques en numérique pour éviter les 'object'
+    for col in ["Temps_Seconds", "Marge_Erreur"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["type"] = df["Operation"].map(_infer_type_from_operation)
+    df["ok"] = (df["Etat"] == "VRAI").astype(int)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("Précision globale", f"{int(100*df['ok'].mean()) if len(df)>0 else 0}%")
+    with c2:
+        st.metric("Temps moyen (s)", f"{df['Temps_Seconds'].mean():.1f}")
+    with c3:
+        st.metric("Marge d'erreur moy.", f"{df['Marge_Erreur'].mean():.2f}")
+
+    st.subheader("Par opération")
+    synth = df.groupby("type").agg(
+        questions=("ok","count"),
+        accuracy=("ok","mean"),
+        temps_moyen=("Temps_Seconds","mean"),
+        marge_moy=("Marge_Erreur","mean")
+    ).reset_index()
+
+    if not synth.empty:
+        synth["accuracy"] = (synth["accuracy"]*100).round(0).astype(int)
+        synth["temps_moyen"] = synth["temps_moyen"].round(1)
+        synth["marge_moy"] = synth["marge_moy"].round(2)
+        st.dataframe(synth, use_container_width=True)
+        st.bar_chart(synth.set_index("type")[["accuracy","temps_moyen","marge_moy"]])
+
+    if st.button("🏠 Retour à l'accueil"):
+        st.session_state.page = "home"; st.rerun()
+
 def classement_page():
     st.title("🏆 Classement des Pixel-Monstres")
     top_players = get_classement(limit=10)
@@ -1038,7 +1282,6 @@ def classement_page():
             except Exception:
                 st.text("❌")
 
-
 # --------------------- NAVIGATION ---------------------
 
 if st.session_state.page == "login":
@@ -1055,4 +1298,9 @@ elif st.session_state.page == "correction":
     correction_page()
 elif st.session_state.page == "classement":
     classement_page()
-
+elif st.session_state.page == "analyse":
+    analyse_page()
+elif st.session_state.page == "training_lobby":
+    training_lobby_page()
+elif st.session_state.page == "progression":
+    analyse_page()  # ou ta page progression si tu l'as renommée/simplifiée
