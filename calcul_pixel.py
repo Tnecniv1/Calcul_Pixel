@@ -39,6 +39,7 @@ load_dotenv()
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 # --- 🔹 Réinitialisation d'un nouvel entraînement ---
+
 def start_new_training():
     """Réinitialise l'état de session pour un nouvel entraînement"""
     st.session_state.responses_logged = False
@@ -146,46 +147,143 @@ def save_user(name, email, password):
 
 # --------------------- STATS & CLASSEMENT ---------------------
 
-def get_position_actuelle(user_id: int):
+def ensure_initial_suivi(user_id: int):
     """
-    Retourne la position actuelle de l'utilisateur dans le parcours,
-    en regardant la dernière ligne de Suivi_Parcours.
-    Si aucune entrée, retourne None — à gérer ensuite dans analyser_progression().
+    S'assure qu'il existe une ligne de Suivi_Parcours pour chacun des 3 types :
+    Addition, Soustraction, Multiplication. Si absente, on insère le Niveau 1.
     """
-    suivi = (
+    types = ["Addition", "Soustraction", "Multiplication"]
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # Récupère des suivis récents pour l'utilisateur
+    suivis = (
         supabase.table("Suivi_Parcours")
         .select("id, Parcours_Id")
         .eq("Users_Id", user_id)
         .order("id", desc=True)
-        .limit(1)
+        .limit(100)
         .execute()
-        .data
+        .data or []
     )
 
-    if not suivi:
-        print(f"[DEBUG] Aucun suivi trouvé pour user_id={user_id}")
-        return None
+    deja = set()
+    for s in suivis:
+        p = (
+            supabase.table("Parcours")
+            .select("id, Type_Operation")
+            .eq("id", s["Parcours_Id"])
+            .limit(1)
+            .execute()
+            .data
+        )
+        if p:
+            deja.add(p[0]["Type_Operation"])
 
-    parcours_id = suivi[0].get("Parcours_Id")
-    if not parcours_id:
-        print("ERREUR: 'Parcours_Id' manquant dans Suivi_Parcours")
-        return None
+    for type_op in types:
+        if type_op in deja:
+            continue
 
-    parcours = (
-        supabase.table("Parcours")
-        .select("*")
-        .eq("id", parcours_id)
-        .limit(1)
+        # Essai strict par valeur canonique
+        first_parcours = (
+            supabase.table("Parcours")
+            .select("id")
+            .eq("Type_Operation", type_op)   # "Addition" / "Soustraction" / "Multiplication"
+            .order("Niveau")
+            .limit(1)
+            .execute()
+            .data
+        )
+
+        # Fallback 1 : casse/espaces (ilike)
+        if not first_parcours:
+            try:
+                first_parcours = (
+                    supabase.table("Parcours")
+                    .select("id")
+                    .ilike("Type_Operation", type_op)  # ilike est tolérant
+                    .order("Niveau")
+                    .limit(1)
+                    .execute()
+                    .data
+                )
+            except Exception:
+                pass
+
+        # Fallback 2 : symboles historiques
+        if not first_parcours:
+            symbol_map = {"Addition": "+", "Soustraction": "-", "Multiplication": "*"}
+            symbol = symbol_map[type_op]
+            first_parcours = (
+                supabase.table("Parcours")
+                .select("id")
+                .eq("Type_Operation", symbol)
+                .order("Niveau")
+                .limit(1)
+                .execute()
+                .data
+            )
+
+        # Fallback 3 : pas de colonne/valeur Niveau -> ordre par id
+        if not first_parcours:
+            first_parcours = (
+                supabase.table("Parcours")
+                .select("id")
+                .ilike("Type_Operation", type_op)
+                .order("id")
+                .limit(1)
+                .execute()
+                .data
+            )
+
+        if not first_parcours:
+            st.error(f"❌ Aucun Parcours disponible pour {type_op}. Vérifie Type_Operation/Niveau.")
+            continue
+
+
+        parcours_id = first_parcours[0]["id"]
+        supabase.table("Suivi_Parcours").insert({
+            "Users_Id": user_id,
+            "Parcours_Id": parcours_id,
+            "Date": today,
+            "Taux_Reussite": 0,
+            "Type_Evolution": "initialisation",
+            "Derniere_Observation_Id": None
+        }).execute()
+
+        st.write(f"[DEBUG] Suivi initial créé pour {type_op} (Parcours {parcours_id})")
+
+def get_position_actuelle(user_id: int, type_operation: str):
+    """
+    Retourne la ligne Parcours correspondant AU DERNIER suivi de l'utilisateur
+    pour le type demandé (Addition / Soustraction / Multiplication).
+    Si aucun suivi pour ce type, retourne None.
+    """
+    # On récupère quelques suivis récents et on filtre par type côté Python
+    last_suivi = (
+        supabase.table("Suivi_Parcours")
+        .select("id, Parcours_Id")
+        .eq("Users_Id", user_id)
+        .order("id", desc=True)
+        .limit(20)
         .execute()
-        .data
+        .data or []
     )
-
-    if parcours:
-        return parcours[0]
-    else:
-        print(f"ERREUR: Parcours introuvable pour id={parcours_id}")
+    if not last_suivi:
         return None
 
+    for s in last_suivi:
+        p = (
+            supabase.table("Parcours")
+            .select("*")
+            .eq("id", s["Parcours_Id"])
+            .limit(1)
+            .execute()
+            .data
+        )
+        if p and p[0].get("Type_Operation") == type_operation:
+            return p[0]
+
+    return None
 
 def get_user_streak(user_id):
     entrainements = supabase.table("Entrainement").select("Date").eq("Users_Id", user_id).order("Date", desc=True).execute().data or []
@@ -235,58 +333,84 @@ def get_user_total_score(user_id: int) -> int:
     # 3️⃣ Somme des scores
     return sum(obs.get("Score", 0) for obs in observations)
 
-def analyser_progression(user_id, last_obs_id=None, parcours_id=None):
+def analyser_progression(user_id, last_obs_id=None, parcours_id=None, type_operation=None):
+    """
+    Analyse et met à jour la progression POUR UN TYPE d'opération donné,
+    en ne considérant que les observations rattachées au Parcours_Id courant.
+    - user_id: int
+    - last_obs_id: int | None  -> id max de l'observation après l'entraînement (peut être None)
+    - parcours_id: int | None  -> parcours courant pour ce type (si None, on init niveau 1)
+    - type_operation: str      -> "Addition" | "Soustraction" | "Multiplication"
+    """
     import math
-    st.write("[DEBUG] Début de l’analyse de progression")
+    from datetime import datetime
 
-    # 1️⃣ Récupérer le dernier suivi existant
-    last_suivi = supabase.table("Suivi_Parcours")\
-        .select("Parcours_Id,Derniere_Observation_Id,id")\
-        .eq("Users_Id", user_id)\
-        .order("id", desc=True)\
-        .limit(1)\
-        .execute().data
+    if type_operation not in ("Addition", "Soustraction", "Multiplication"):
+        st.error("❌ analyser_progression(): 'type_operation' doit être Addition/Soustraction/Multiplication")
+        return
 
-    # 2️⃣ Cas initial : aucun suivi → on insère une première ligne complète
-    if not last_suivi:
-        st.write("[DEBUG] Aucun suivi existant, création du premier...")
+    st.write(f"[DEBUG] Analyse progression pour {type_operation}")
 
-        # Parcours actuel
+    # 1) Récupérer le dernier suivi EXISTANT pour CE TYPE (via Parcours -> Type_Operation)
+    last_suivis = (
+        supabase.table("Suivi_Parcours")
+        .select("Parcours_Id,Derniere_Observation_Id,id")
+        .eq("Users_Id", user_id)
+        .order("id", desc=True)
+        .limit(50)
+        .execute().data or []
+    )
+
+    suivi_match = None
+    for s in last_suivis:
+        p = (
+            supabase.table("Parcours")
+            .select("id,Type_Operation")
+            .eq("id", s["Parcours_Id"])
+            .limit(1)
+            .execute().data
+        )
+        if p and p[0]["Type_Operation"] == type_operation:
+            suivi_match = s
+            break
+
+    # 2) CAS INITIAL: pas de suivi pour ce type -> on pointe sur le 1er niveau de ce type et on insère "initialisation"
+    if not suivi_match:
+        st.write(f"[DEBUG] Aucun suivi pour {type_operation} — initialisation")
         if not parcours_id:
-            first_parcours = supabase.table("Parcours")\
-                .select("id")\
-                .order("id")\
-                .limit(1)\
+            first_parcours = (
+                supabase.table("Parcours")
+                .select("id")
+                .eq("Type_Operation", type_operation)
+                .order("Niveau")         # utilise la colonne Niveau si dispo
+                .limit(1)
                 .execute().data
+            )
             if not first_parcours:
-                st.error("❌ Aucun parcours disponible")
+                # fallback si pas de Niveau/valeurs
+                first_parcours = (
+                    supabase.table("Parcours")
+                    .select("id")
+                    .eq("Type_Operation", type_operation)
+                    .order("id")
+                    .limit(1)
+                    .execute().data
+                )
+            if not first_parcours:
+                st.error(f"❌ Aucun parcours disponible pour {type_operation}")
                 return
             parcours_id = first_parcours[0]["id"]
 
-        # Trouver la première observation de l'utilisateur via son dernier entraînement
-        last_entr = supabase.table("Entrainement")\
-            .select("id")\
-            .eq("Users_Id", user_id)\
-            .order("id", desc=True)\
-            .limit(1)\
+        # Première observation existante (si tu veux stocker une référence)
+        first_obs = (
+            supabase.table("Observations")
+            .select("id")
+            .order("id")
+            .limit(1)
             .execute().data
-
-        if not last_entr:
-            st.warning("⚠️ Aucun entraînement trouvé pour cet utilisateur.")
-            return
-
-        entrainement_id = last_entr[0]["id"]
-
-        # 🔹 On essaie de récupérer une première observation
-        first_obs = supabase.table("Observations")\
-            .select("id")\
-            .order("id")\
-            .limit(1)\
-            .execute().data
-
+        )
         first_obs_id = first_obs[0]["id"] if first_obs else None
 
-        # 🔵 Insertion même sans observation
         supabase.table("Suivi_Parcours").insert({
             "Users_Id": user_id,
             "Parcours_Id": parcours_id,
@@ -296,77 +420,96 @@ def analyser_progression(user_id, last_obs_id=None, parcours_id=None):
             "Derniere_Observation_Id": first_obs_id
         }).execute()
 
-        st.success("✅ Suivi initialisé même sans observation")
-
-        st.success("✅ Suivi initial inséré avec succès")
+        st.write(f"[DEBUG] {type_operation}: suivi initialisé (Parcours {parcours_id})")
         return
 
-    # 3️⃣ Cas normal : un suivi existe → analyse de progression
-    parcours_id = last_suivi[0]["Parcours_Id"]
-    last_obs_used = last_suivi[0]["Derniere_Observation_Id"]
+    # 3) CAS NORMAL: analyser depuis la dernière observation prise en compte pour CE TYPE
+    parcours_id = suivi_match["Parcours_Id"]
+    last_obs_used = suivi_match["Derniere_Observation_Id"] or 0
 
-    # 4️⃣ Récupérer le critère du niveau actuel
-    parcours_data = supabase.table("Parcours")\
-        .select("Critere")\
-        .eq("id", parcours_id)\
+    # 3.1 Critère du niveau courant
+    parcours_row = (
+        supabase.table("Parcours")
+        .select("Critere, Type_Operation")
+        .eq("id", parcours_id)
+        .limit(1)
         .execute().data
-    if not parcours_data:
+    )
+    if not parcours_row:
+        st.error("❌ Parcours introuvable pour l'analyse")
         return
-    critere = parcours_data[0]["Critere"]
+    critere = parcours_row[0]["Critere"]
 
-    # 5️⃣ Récupérer les nouvelles observations
-    observations = supabase.table("Observations")\
-        .select("id,Etat")\
-        .gt("id", last_obs_used)\
-        .execute().data
+    # 3.2 Nouvelles observations de CE PARCOURS (clé !)
+    # On ne prend que les Observations rattachées à ce Parcours_Id et postérieures au last_obs_used.
+    observations = (
+        supabase.table("Observations")
+        .select("id, Etat")
+        .eq("Parcours_Id", parcours_id)
+        .gt("id", last_obs_used)
+        .order("id")
+        .limit(10000)
+        .execute().data or []
+    )
 
     total_obs = len(observations)
-    st.write(f"[DEBUG] Nouvelles observations trouvées : {total_obs}")
+    st.write(f"[DEBUG] {type_operation}: nouvelles obs pour Parcours {parcours_id} = {total_obs}")
 
     if total_obs < critere:
-        st.write("[DEBUG] Pas encore assez de données pour une évaluation.")
+        st.write(f"[DEBUG] {type_operation}: pas assez de données ({total_obs}/{critere}).")
         return
 
-    # 6️⃣ Calcul du taux de réussite
+    # 3.3 Calcul du taux sur les 'critere' dernières obs
     selection = observations[-critere:]
     nb_bonnes = sum(1 for obs in selection if obs["Etat"] == "VRAI")
     taux = round(nb_bonnes / critere, 2)
-    st.write(f"[DEBUG] Taux de réussite : {taux}")
+    st.write(f"[DEBUG] {type_operation}: taux={taux} sur {critere} obs")
 
-    # 7️⃣ Déterminer l'évolution
+    # 3.4 Déterminer l'évolution et le prochain parcours (toujours DANS LE MÊME TYPE)
     evolution = "stagnation"
+    next_parcours_id = parcours_id
+
     if taux >= 0.8:
         evolution = "progression"
-        next_parcours = supabase.table("Parcours")\
-            .select("id")\
-            .gt("id", parcours_id)\
-            .order("id")\
-            .limit(1)\
+        next_row = (
+            supabase.table("Parcours")
+            .select("id")
+            .eq("Type_Operation", type_operation)
+            .gt("id", parcours_id)
+            .order("id")
+            .limit(1)
             .execute().data
-        if next_parcours:
-            parcours_id = next_parcours[0]["id"]
+        )
+        if next_row:
+            next_parcours_id = next_row[0]["id"]
+
     elif taux < 0.5:
         evolution = "régression"
-        prev_parcours = supabase.table("Parcours")\
-            .select("id")\
-            .lt("id", parcours_id)\
-            .order("id", desc=True)\
-            .limit(1)\
+        prev_row = (
+            supabase.table("Parcours")
+            .select("id")
+            .eq("Type_Operation", type_operation)
+            .lt("id", parcours_id)
+            .order("id", desc=True)
+            .limit(1)
             .execute().data
-        if prev_parcours:
-            parcours_id = prev_parcours[0]["id"]
+        )
+        if prev_row:
+            next_parcours_id = prev_row[0]["id"]
 
-    # 8️⃣ Insérer un nouveau suivi
+    # 3.5 Enregistrer un nouveau Suivi_Parcours pour CE TYPE
     supabase.table("Suivi_Parcours").insert({
         "Users_Id": user_id,
-        "Parcours_Id": parcours_id,
+        "Parcours_Id": next_parcours_id,
         "Date": datetime.now().strftime("%Y-%m-%d"),
         "Taux_Reussite": taux,
         "Type_Evolution": evolution,
-        "Derniere_Observation_Id": last_obs_id
+        "Derniere_Observation_Id": last_obs_id  # id max observé lors de CET entraînement
     }).execute()
 
-    st.write(f"[DEBUG] Nouveau suivi enregistré ({evolution}) — niveau {parcours_id}")
+    st.write(f"[DEBUG] {type_operation}: suivi enregistré ({evolution}) — nouveau parcours {next_parcours_id}")
+
+
 
 def get_classement(limit=None):
     users = supabase.table("Users").select("id,name").execute().data or []
@@ -413,35 +556,29 @@ def render_monstre_progress(score, mask):
 # --------------------- GPT QCM ---------------------
 
 def generate_mental_calculation(user_id: int, nb_questions: int = 5):
-    """
-    Génère N additions, N soustractions et N multiplications basées sur le niveau de l'utilisateur.
-    """
-    st.write("DEBUG: generate_mental_calculation() appelée ✅")
-    st.write("DEBUG user_id =", user_id)
-    st.write("DEBUG nb_questions =", nb_questions)
+    st.write("DEBUG: generate_mental_calculation() par type ✅")
 
-    # 1️⃣ Récupération de la position (niveau actuel)
-    pos = get_position_actuelle(user_id)
-    if not pos:
-        st.error("ERREUR: Impossible de récupérer la position utilisateur.")
-        return []
+    types = ["Addition", "Soustraction", "Multiplication"]
+    symbol_map = {"Addition": "+", "Soustraction": "-", "Multiplication": "*"}
 
-    st.write("DEBUG position =", pos)
-
-    # 2️⃣ Lire les bornes du niveau
-    try:
-        op1_min = pos["Operateur1_Min"]
-        op1_max = pos["Operateur1_Max"]
-        op2_min = pos["Operateur2_Min"]
-        op2_max = pos["Operateur2_Max"]
-    except KeyError as e:
-        st.error(f"ERREUR: Clé manquante dans la table Parcours : {e}")
-        return []
-
-    # 3️⃣ Générer les questions par type
     questions = []
 
-    for operateur in ["+", "-", "*"]:
+    for type_op in types:
+        pos = get_position_actuelle(user_id, type_op)
+        if not pos:
+            st.warning(f"Aucun parcours trouvé pour {type_op} — il sera initialisé si besoin.")
+            continue
+
+        try:
+            op1_min = pos["Operateur1_Min"]
+            op1_max = pos["Operateur1_Max"]
+            op2_min = pos["Operateur2_Min"]
+            op2_max = pos["Operateur2_Max"]
+        except KeyError as e:
+            st.error(f"Clé manquante dans Parcours ({type_op}) : {e}")
+            continue
+
+        operateur = symbol_map[type_op]
         for _ in range(nb_questions):
             op1 = random.randint(op1_min, op1_max)
             op2 = random.randint(op2_min, op2_max)
@@ -450,18 +587,17 @@ def generate_mental_calculation(user_id: int, nb_questions: int = 5):
                 solution = op1 + op2
             elif operateur == "-":
                 solution = op1 - op2
-            elif operateur == "*":
+            else:
                 solution = op1 * op2
 
             questions.append({
                 "operation": f"{op1} {operateur} {op2}",
-                "solution": solution
+                "solution": solution,
+                "type_operation": type_op
             })
 
-    # 4️⃣ Mélanger les opérations
     random.shuffle(questions)
-
-    st.write("DEBUG: Nombre total de questions générées =", len(questions))
+    st.write("DEBUG: Total questions générées =", len(questions))
     return questions
 
 def save_mental_exercise(exo, parcours_id):
@@ -486,12 +622,14 @@ def generate_questions(n):
 
 # --------------------- LOGIQUE QCM ---------------------
 
+def _infer_type_from_operation(op_str: str) -> str:
+    if " + " in op_str or "+" in op_str: return "Addition"
+    if " - " in op_str or "-" in op_str: return "Soustraction"
+    if " * " in op_str or "*" in op_str: return "Multiplication"
+    return "Addition"
+
 def log_responses_to_supabase():
     st.write("DEBUG: log_responses_to_supabase appelée")
-    st.write("DEBUG: responses_logged =", st.session_state.get("responses_logged", None))
-    st.write("DEBUG: answers =", st.session_state.get("answers", None))
-
-    # ⚠️ Empêche les doublons
     if st.session_state.get("responses_logged", False):
         return
 
@@ -499,108 +637,88 @@ def log_responses_to_supabase():
     user_id = st.session_state.user["id"]
     nb_q = len(st.session_state.answers)
 
-    # 🔁 Si aucun suivi, créer une première ligne avec analyser_progression()
-    suivi_existe = supabase.table("Suivi_Parcours")\
-        .select("id")\
-        .eq("Users_Id", user_id)\
-        .limit(1)\
-        .execute().data
-
-    if not suivi_existe:
-        st.write("DEBUG: Aucun suivi trouvé, tentative d'initialisation avec analyser_progression()")
-        try:
-            last_obs_id = supabase.table("Observations") \
-                .select("id") \
-                .order("id") \
-                .limit(1) \
-                .execute().data[0]["id"]
-
-            analyser_progression(user_id, last_obs_id)
-        except Exception as e:
-            st.warning(f"⚠️ Erreur lors de l'initialisation du suivi : {e}")
-
-    # ✅ Récupérer le parcours actuel (niveau)
-    parcours = get_position_actuelle(user_id)
-    if not parcours:
-        st.error("❌ Impossible de récupérer le parcours de l'utilisateur.")
-        return
-
-    parcours_id = parcours["id"]
-    st.write("DEBUG parcours_id =", parcours_id)
-
-    # 1️⃣ Créer un nouvel Entrainement avec Parcours_Id
+    # 1) Créer un Entrainement (Parcours_Id = NULL car multi-parcours)
     entr = supabase.table("Entrainement").insert({
         "Users_Id": user_id,
         "Date": now.strftime("%Y-%m-%d"),
         "Time": now.strftime("%H:%M"),
         "Volume": nb_q,
-        "Parcours_Id": parcours_id
+        "Parcours_Id": None
     }).execute()
-
-    st.write("DEBUG Entrainement insert:", entr.data)
-
     if not entr.data:
         st.error("❌ Impossible de créer un entraînement dans Supabase")
         return
-
     entrainement_id = entr.data[0]["id"]
 
-    # 3️⃣ Vérifie que l'entraînement est bien en base
-    exists = supabase.table("Entrainement").select("id").eq("id", entrainement_id).execute()
-    if not exists.data:
-        st.error("❌ Entrainement introuvable dans la base")
-        return
+    # 2) Préparer mapping Type -> Parcours courant
+    parcours_by_type = {}
+    for type_op in ["Addition", "Soustraction", "Multiplication"]:
+        pos = get_position_actuelle(user_id, type_op)
+        # si pas de suivi encore (rare grâce à ensure_initial_suivi), pos peut être None
+        parcours_by_type[type_op] = pos["id"] if pos else None
 
-    # 4️⃣ Création des observations
+    # 3) Construire Observations (avec Parcours_Id)
     observations_data = []
+    obs_by_type = {"Addition": [], "Soustraction": [], "Multiplication": []}
 
     for entry in st.session_state.answers:
+        op_str = entry["question"]
+        type_op = _infer_type_from_operation(op_str)
+        parcours_id_for_obs = parcours_by_type.get(type_op)
+
         is_correct = entry["is_correct"]
         first_try_correction = entry.get("first_try_correction", False)
 
         score = 1 if (is_correct or first_try_correction) else -1
         etat = "VRAI" if (is_correct or first_try_correction) else "FAUX"
         correction = "OUI" if entry.get("corrected", False) else "NON"
-        operation_str = entry["question"]
 
         try:
-            parts = operation_str.split()
-            operateur_un = int(parts[0])
-            operateur_deux = int(parts[2])
+            parts = op_str.split()
+            operateur_un = int(parts[0]); operateur_deux = int(parts[2])
         except Exception:
-            operateur_un = None
-            operateur_deux = None
+            operateur_un = None; operateur_deux = None
 
-        observations_data.append({
+        obs = {
             "Entrainement_Id": entrainement_id,
+            "Parcours_Id": parcours_id_for_obs,   # <-- NOUVEAU
             "Operateur_Un": operateur_un,
             "Operateur_Deux": operateur_deux,
-            "Operation": operation_str,
+            "Operation": op_str,
             "Etat": etat,
             "Correction": correction,
             "Score": score
-        })
-
-    st.write("DEBUG Observations à insérer:", observations_data)
+        }
+        observations_data.append(obs)
+        obs_by_type[type_op].append(obs)
 
     if observations_data:
         supabase.table("Observations").insert(observations_data).execute()
     else:
         st.warning("⚠️ Aucune observation à insérer")
 
-    # 7️⃣ Appel à analyser_progression()
-    try:
-        last_obs_id = supabase.table("Observations") \
-            .select("id") \
-            .order("id", desc=True) \
-            .limit(1) \
-            .execute().data[0]["id"]
+    # 4) Progression par type (on prend le last_obs_id de l'entraînement,
+    #    et on appelle analyser_progression pour chaque type concerné)
+    last_obs_row = (
+        supabase.table("Observations")
+        .select("id")
+        .eq("Entrainement_Id", entrainement_id)
+        .order("id", desc=True)
+        .limit(1)
+        .execute().data
+    )
+    last_obs_id = last_obs_row[0]["id"] if last_obs_row else None
 
-        analyser_progression(user_id, last_obs_id, parcours_id)
-    except Exception as e:
-        st.warning(f"⚠️ Analyse de progression impossible : {e}")
+    for type_op, obs_list in obs_by_type.items():
+        if not obs_list:
+            continue
+        p = get_position_actuelle(user_id, type_op)
+        parcours_id = p["id"] if p else None
+        try:
+            analyser_progression(user_id, last_obs_id, parcours_id, type_op)
+        except Exception as e:
+            st.warning(f"⚠️ Analyse de progression impossible pour {type_op} : {e}")
 
-    # 8️⃣ Marque la session comme loggée
     st.session_state.responses_logged = True
 
 # --------------------- PAGES ---------------------
@@ -615,36 +733,66 @@ def home_page():
 
     user_id = user["id"]
 
-    # 🆕 S'assurer qu'un suivi existe pour cet utilisateur
-    existing_suivi = supabase.table("Suivi_Parcours") \
-        .select("id") \
-        .eq("Users_Id", user_id) \
-        .limit(1) \
-        .execute().data
+    # --- DEBUG SONDE SUPABASE ---
+    try:
+        sonde = (
+            supabase.table("Parcours")
+            .select("id,Type_Operation,Niveau")
+            .limit(5)
+            .execute()
+            .data
+        )
+        st.write("[SONDE] Parcours (top 5) vus par l'appli:", sonde)
 
-    if not existing_suivi:
-        st.write("DEBUG: Aucun suivi trouvé — appel à analyser_progression() pour initialiser.")
-        analyser_progression(user_id)
+        types_distincts = (
+            supabase.table("Parcours")
+            .select("Type_Operation")
+            .execute()
+            .data
+        )
+        st.write("[SONDE] Types vus par l'appli:", types_distincts)
+    except Exception as e:
+        st.error(f"[SONDE] Erreur lecture Parcours: {e}")
+    # --- FIN SONDE ---
 
-    # 📍 Une fois le suivi assuré, on peut récupérer la position actuelle
+    # 🧰 Initialisation sûre : créer les 3 suivis si absents
+    try:
+        ensure_initial_suivi(user_id)
+    except Exception as e:
+        st.error(f"Erreur lors de l'initialisation du suivi : {e}")
+        return
+
+    # 📊 Stats utilisateur
     total_score = get_user_total_score(user_id)
-    position = get_position_actuelle(user_id)
     streak = get_user_streak(user_id)
 
-    niveau = position["Niveau"] if position else "Inconnu"
+    # 📍 Récupérer les niveaux actuels par type
+    position_add = get_position_actuelle(user_id, "Addition")
+    position_sous = get_position_actuelle(user_id, "Soustraction")
+    position_mult = get_position_actuelle(user_id, "Multiplication")
+
+    niveau_add = position_add["Niveau"] if position_add and "Niveau" in position_add else "—"
+    niveau_sous = position_sous["Niveau"] if position_sous and "Niveau" in position_sous else "—"
+    niveau_mult = position_mult["Niveau"] if position_mult and "Niveau" in position_mult else "—"
+
     st.title(f"Bienvenue, {user.get('name', 'Utilisateur')} 👋")
     st.markdown(f"### 🏆 Score cumulé : **{total_score}** points")
-    st.markdown(f"### 📚 Niveau actuel : **{niveau}**")
-    st.markdown(f"### 🔥 Série en cours : **{streak}** jours !")
+    st.markdown(f"### 🔥 Série en cours : **{streak}** jours")
 
-    # Pixel-Monstre
-    if "pixel_image" not in st.session_state:
-        try:
-            mask = load_monstre_mask("monstre.png")
-            st.session_state.pixel_image = render_monstre_progress(int(total_score), mask)
-            st.session_state.pixel_caption = f"{total_score} / {mask.sum()} pixels allumés"
-        except Exception as e:
-            st.warning(f"Impossible d'afficher le monstre : {e}")
+    st.subheader("📚 Niveaux actuels par opération")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown(f"**Addition**<br/>Niveau : **{niveau_add}**", unsafe_allow_html=True)
+        if position_add:
+            st.caption(f"BORNES: {position_add.get('Operateur1_Min','?')}-{position_add.get('Operateur1_Max','?')} et {position_add.get('Operateur2_Min','?')}-{position_add.get('Operateur2_Max','?')}")
+    with c2:
+        st.markdown(f"**Soustraction**<br/>Niveau : **{niveau_sous}**", unsafe_allow_html=True)
+        if position_sous:
+            st.caption(f"BORNES: {position_sous.get('Operateur1_Min','?')}-{position_sous.get('Operateur1_Max','?')} et {position_sous.get('Operateur2_Min','?')}-{position_sous.get('Operateur2_Max','?')}")
+    with c3:
+        st.markdown(f"**Multiplication**<br/>Niveau : **{niveau_mult}**", unsafe_allow_html=True)
+        if position_mult:
+            st.caption(f"BORNES: {position_mult.get('Operateur1_Min','?')}-{position_mult.get('Operateur1_Max','?')} et {position_mult.get('Operateur2_Min','?')}-{position_mult.get('Operateur2_Max','?')}")
 
     st.subheader("Combien de questions veux-tu faire aujourd’hui ?")
     col1, col2, col3 = st.columns(3)
@@ -662,17 +810,29 @@ def home_page():
             start_new_training()
 
     st.subheader("🧩 Ton Pixel-Monstre")
+    if "pixel_image" not in st.session_state:
+        try:
+            mask = load_monstre_mask("monstre.png")
+            st.session_state.pixel_image = render_monstre_progress(int(total_score), mask)
+            st.session_state.pixel_caption = f"{total_score} / {mask.sum()} pixels allumés"
+        except Exception as e:
+            st.warning(f"Impossible d'afficher le monstre : {e}")
+
     if "pixel_image" in st.session_state:
-        st.image(st.session_state.pixel_image,
-                 caption=st.session_state.pixel_caption,
-                 use_container_width=True)
+        st.image(
+            st.session_state.pixel_image,
+            caption=st.session_state.pixel_caption,
+            use_container_width=True
+        )
 
-    if st.button("🏆 Voir le classement"):
-        st.session_state.page = "classement"
-
-    if st.button("Se déconnecter"):
-        st.session_state.clear()
-        st.session_state.page = "login"
+    colA, colB = st.columns(2)
+    with colA:
+        if st.button("🏆 Voir le classement"):
+            st.session_state.page = "classement"
+    with colB:
+        if st.button("Se déconnecter"):
+            st.session_state.clear()
+            st.session_state.page = "login"
 
 def mental_calc_page():
     st.title("Entraînement de calcul mental 🔢")
