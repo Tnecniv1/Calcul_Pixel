@@ -99,7 +99,6 @@ def login_page():
     # Optionnel : lien texte
     st.caption("Pas encore de compte ? Cliquez sur **Créer un compte** pour vous inscrire.")
 
-
 def signup_page():
     st.title("Créer un compte")
 
@@ -476,7 +475,7 @@ def analyser_progression(user_id, last_obs_id=None, parcours_id=None, type_opera
     evolution = "stagnation"
     next_parcours_id = parcours_id
 
-    if taux >= 0.8:
+    if taux >= 0.95:
         evolution = "progression"
         next_row = (
             supabase.table("Parcours")
@@ -595,6 +594,8 @@ def generate_mental_calculation(user_id: int, nb_questions_per_type: int):
                 op_str = f"{a} + {b}"
                 sol = a + b
             elif type_op == "Soustraction":
+                if a < b:
+                    a, b = b, a
                 op_str = f"{a} - {b}"
                 sol = a - b
             elif type_op == "Multiplication":
@@ -649,95 +650,125 @@ def log_responses_to_supabase():
 
     now = datetime.now()
     user_id = st.session_state.user["id"]
-    nb_q = len(st.session_state.answers)
+    answers = st.session_state.answers
 
-    # 1) Créer l'entraînement (multi-parcours → Parcours_Id NULL)
-    entr = supabase.table("Entrainement").insert({
-        "Users_Id": user_id,
-        "Date": now.strftime("%Y-%m-%d"),
-        "Time": now.strftime("%H:%M"),
-        "Volume": nb_q,
-        "Parcours_Id": None
-    }).execute()
-    if not entr.data:
-        st.error("❌ Impossible de créer un entraînement dans Supabase")
-        return
-    entrainement_id = entr.data[0]["id"]
-
-    # 2) Mapping Type -> Parcours courant
-    parcours_by_type = {}
-    for type_op in ["Addition", "Soustraction", "Multiplication"]:
-        pos = get_position_actuelle(user_id, type_op)
-        parcours_by_type[type_op] = pos["id"] if pos else None
-
-    # 3) Construire Observations (avec temps & marge)
-    observations_data = []
-    obs_by_type = {"Addition": [], "Soustraction": [], "Multiplication": []}
-
-    for entry in st.session_state.answers:
+    # 1) Regrouper les réponses par type d'opération
+    grouped_entries = {"Addition": [], "Soustraction": [], "Multiplication": []}
+    for entry in answers:
         op_str = entry["question"]
-        type_op = entry.get("type_operation") or _infer_type_from_operation(op_str)
-        parcours_id_for_obs = parcours_by_type.get(type_op)
+        t = entry.get("type_operation") or _infer_type_from_operation(op_str)
+        if t in grouped_entries:
+            grouped_entries[t].append(entry)
 
-        is_correct = entry["is_correct"]
-        first_try_correction = entry.get("first_try_correction", False)
+    # 2) Récupérer la position courante (Parcours_Id) par type
+    parcours_by_type = {}
+    for t in ["Addition", "Soustraction", "Multiplication"]:
+        pos = get_position_actuelle(user_id, t)
+        parcours_by_type[t] = pos["id"] if pos else None
 
-        score = 1 if (is_correct or first_try_correction) else -1
-        etat = "VRAI" if (is_correct or first_try_correction) else "FAUX"
-        correction = "OUI" if entry.get("corrected", False) else "NON"
+    # 3) Créer un Entrainement par type (avec le bon Parcours_Id + Volume du type)
+    entrainement_ids_by_type = {}
+    for t, entries in grouped_entries.items():
+        if not entries:
+            continue
 
-        # Temps & marge
-        temps_seconds = int(entry.get("elapsed", 0))
-        marge_erreur = int(entry.get("error_margin", 0))
+        pid = parcours_by_type.get(t)
+        if not pid:
+            st.warning(f"⚠️ Aucun Parcours_Id trouvé pour {t}, entraînement non créé pour ce type.")
+            continue
 
-        try:
-            parts = op_str.split()
-            operateur_un = int(parts[0]); operateur_deux = int(parts[2])
-        except Exception:
-            operateur_un = None; operateur_deux = None
+        resp = supabase.table("Entrainement").insert({
+            "Users_Id": user_id,
+            "Date": now.strftime("%Y-%m-%d"),
+            "Time": now.strftime("%H:%M"),
+            "Volume": len(entries),     # volume spécifique à ce type
+            "Parcours_Id": pid          # ✅ toujours renseigné
+        }).execute()
 
-        obs = {
-            "Entrainement_Id": entrainement_id,
-            "Parcours_Id": parcours_id_for_obs,
-            "Operateur_Un": operateur_un,
-            "Operateur_Deux": operateur_deux,
-            "Operation": op_str,
-            "Etat": etat,
-            "Correction": correction,
-            "Score": score,
-            "Temps_Seconds": temps_seconds,     # <-- NOUVEAU
-            "Marge_Erreur": marge_erreur        # <-- NOUVEAU
-        }
-        observations_data.append(obs)
-        obs_by_type[type_op].append(obs)
+        if not resp.data:
+            st.error(f"❌ Impossible de créer un entraînement {t} dans Supabase")
+            continue
+
+        entrainement_ids_by_type[t] = resp.data[0]["id"]
+
+    # Si aucun entraînement n'a été créé (ex: pas de réponses), on sort
+    if not entrainement_ids_by_type:
+        st.warning("⚠️ Aucun entraînement créé (pas de réponses ou pas de parcours).")
+        return
+
+    # 4) Construire et insérer les Observations en les rattachant au bon Entrainement_Id et Parcours_Id
+    observations_data = []
+    for t, entries in grouped_entries.items():
+        if not entries or t not in entrainement_ids_by_type:
+            continue
+
+        entrainement_id = entrainement_ids_by_type[t]
+        parcours_id_for_obs = parcours_by_type.get(t)
+
+        for entry in entries:
+            op_str = entry["question"]
+            is_correct = entry["is_correct"]
+            first_try_correction = entry.get("first_try_correction", False)
+
+            score = 1 if (is_correct or first_try_correction) else -1
+            etat = "VRAI" if (is_correct or first_try_correction) else "FAUX"
+            correction = "OUI" if entry.get("corrected", False) else "NON"
+
+            temps_seconds = int(entry.get("elapsed", 0))
+            marge_erreur = int(entry.get("error_margin", 0))
+
+            try:
+                parts = op_str.split()
+                operateur_un = int(parts[0]); operateur_deux = int(parts[2])
+            except Exception:
+                operateur_un = None; operateur_deux = None
+
+            observations_data.append({
+                "Entrainement_Id": entrainement_id,   # ✅ clé vers le bon entraînement (par type)
+                "Parcours_Id": parcours_id_for_obs,   # ✅ niveau de ce type
+                "Operateur_Un": operateur_un,
+                "Operateur_Deux": operateur_deux,
+                "Operation": op_str,
+                "Etat": etat,
+                "Correction": correction,
+                "Score": score,
+                "Temps_Seconds": temps_seconds,
+                "Marge_Erreur": marge_erreur
+            })
 
     if observations_data:
         supabase.table("Observations").insert(observations_data).execute()
     else:
         st.warning("⚠️ Aucune observation à insérer")
+        return
 
-    # 4) Appels progression par type
-    last_obs_row = (
-        supabase.table("Observations")
-        .select("id")
-        .eq("Entrainement_Id", entrainement_id)
-        .order("id", desc=True)
-        .limit(1)
-        .execute().data
-    )
-    last_obs_id = last_obs_row[0]["id"] if last_obs_row else None
-
-    for type_op, obs_list in obs_by_type.items():
-        if not obs_list:
+    # 5) Progression par type : on récupère l'ID max des observations du type (via l'Entrainement_Id du type)
+    for t, entrainement_id in entrainement_ids_by_type.items():
+        # Sanity: s'il n'y a pas eu d'observations pour ce type, on skip
+        if not grouped_entries.get(t):
             continue
-        p = get_position_actuelle(user_id, type_op)
-        parcours_id = p["id"] if p else None
+
+        last_obs_row = (
+            supabase.table("Observations")
+            .select("id")
+            .eq("Entrainement_Id", entrainement_id)
+            .order("id", desc=True)
+            .limit(1)
+            .execute().data
+        )
+        last_obs_id = last_obs_row[0]["id"] if last_obs_row else None
+
+        # Parcours courant pour ce type (peut avoir évolué entre temps mais on garde la cohérence)
+        p = get_position_actuelle(user_id, t)
+        parcours_id = p["id"] if p else parcours_by_type.get(t)
+
         try:
-            analyser_progression(user_id, last_obs_id, parcours_id, type_op)
+            analyser_progression(user_id, last_obs_id, parcours_id, t)
         except Exception as e:
-            st.warning(f"⚠️ Analyse de progression impossible pour {type_op} : {e}")
+            st.warning(f"⚠️ Analyse de progression impossible pour {t} : {e}")
 
     st.session_state.responses_logged = True
+
 
 # --------------------- PAGES ---------------------
 
@@ -775,16 +806,22 @@ def home_page():
 
     # 2 boutons principaux
     st.markdown("### ")
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
+
     with col1:
         if st.button("🏋️ Entraînement", use_container_width=True):
             st.session_state.page = "training_lobby"
             st.rerun()
+
     with col2:
         if st.button("📈 Progression", use_container_width=True):
             st.session_state.page = "progression"
             st.rerun()
 
+    with col3:
+        if st.button("🏆 Classement", use_container_width=True):
+            st.session_state.page = "classement"
+            st.rerun()
     # Petit pied de page
     st.markdown("### ")
     c1, c2 = st.columns(2)
