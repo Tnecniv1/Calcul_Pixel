@@ -73,27 +73,32 @@ def authenticate_user(email: str, password: str):
     return None  # Mot de passe incorrect
 
 def login_page():
-    """Affiche la page de connexion"""
-    st.title("🔐 Connexion à Calcul Pixel Mental")
+    st.title("🔐 Connexion à Pixel")
 
     email = st.text_input("Email")
     password = st.text_input("Mot de passe", type="password")
 
-    if st.button("Connexion"):
-        user = authenticate_user(email, password)
-        if user:
-            # 1️⃣ Stockage complet en session
-            st.session_state.user = user
-            st.session_state.user_id = user["id"]
+    colA, colB = st.columns([1,1])
+    with colA:
+        if st.button("Connexion", use_container_width=True):
+            user = authenticate_user(email, password)
+            if user:
+                st.session_state.user = user
+                st.session_state.user_id = user["id"]
+                st.query_params["user_id"] = str(user["id"])
+                st.session_state.page = "home"
+                st.rerun()
+            else:
+                st.error("Email ou mot de passe incorrect.")
 
-            # 2️⃣ Ajout de l'user_id dans l'URL
-            st.query_params["user_id"] = str(user["id"])
-
-            # 3️⃣ Redirection vers la page d'accueil
-            st.session_state.page = "home"
+    with colB:
+        if st.button("Créer un compte", use_container_width=True):
+            st.session_state.page = "signup"
             st.rerun()
-        else:
-            st.error("Email ou mot de passe incorrect.")
+
+    # Optionnel : lien texte
+    st.caption("Pas encore de compte ? Cliquez sur **Créer un compte** pour vous inscrire.")
+
 
 def signup_page():
     st.title("Créer un compte")
@@ -1190,74 +1195,263 @@ def correction_page():
             st.session_state.page = "home"
             st.rerun()
 
-def analyse_page():
-    st.title("Analyse de progression 📈")
+def progression_page():
+    import pandas as pd
 
-    # Relecture du dernier entraînement de l'utilisateur
     user = st.session_state.get("user")
     if not user:
-        st.warning("Non connecté")
-        st.session_state.page = "login"; st.rerun(); return
+        st.warning("⚠️ Non connecté.")
+        st.session_state.page = "login"
+        st.rerun()
+        return
     user_id = user["id"]
 
-    last_entr = (
+    st.title("Analyse de progression 📈")
+
+    # ----------------- Filtres (haut) -----------------
+    c0, c1, c2, c3 = st.columns([1, 1.2, 1.2, 1.2])
+    with c0:
+        axe = st.selectbox("Axe", ["Entraînements", "Observations"])
+    with c1:
+        op_choice = st.selectbox("Opération", ["Mixte", "Addition", "Soustraction", "Multiplication"])
+    with c2:
+        fenetre_label = st.selectbox("Fenêtre", ["Aujourd'hui", "Cette semaine", "Ce mois-ci", "Max"], index=1)
+    with c3:
+        kpi = st.selectbox("KPI", ["Score net", "Taux de Réussite", "Marge d'erreur", "Temps par op."], index=0)
+
+    # ----------------- Chargement data -----------------
+    entr_rows = (
         supabase.table("Entrainement")
-        .select("id, Date, Time, Volume")
+        .select("id, Date")
         .eq("Users_Id", user_id)
-        .order("id", desc=True)
-        .limit(1)
-        .execute().data
+        .order("id")
+        .execute().data or []
     )
-    if not last_entr:
+    if not entr_rows:
         st.info("Aucun entraînement à analyser.")
         return
 
-    entr_id = last_entr[0]["id"]
-    st.caption(f"Dernier entraînement #{entr_id} — {last_entr[0]['Date']} {last_entr[0]['Time']}")
+    entr_df = pd.DataFrame(entr_rows)
+    entr_df["Date"] = pd.to_datetime(entr_df["Date"], errors="coerce")
+    entr_ids = entr_df["id"].tolist()
 
-    obs = (
+    obs_rows = (
         supabase.table("Observations")
-        .select("Operation, Etat, Temps_Seconds, Marge_Erreur, Parcours_Id")
-        .eq("Entrainement_Id", entr_id)
+        .select("Entrainement_Id, Etat, Score, Temps_Seconds, Marge_Erreur, Parcours_Id, Operation")
+        .in_("Entrainement_Id", entr_ids)
         .execute().data or []
     )
-    if not obs:
-        st.info("Aucune observation pour cet entraînement.")
+    if not obs_rows:
+        st.info("Aucune observation pour ces entraînements.")
         return
 
-    df = pd.DataFrame(obs)
-        # Cast des métriques en numérique pour éviter les 'object'
-    for col in ["Temps_Seconds", "Marge_Erreur"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    df["type"] = df["Operation"].map(_infer_type_from_operation)
-    df["ok"] = (df["Etat"] == "VRAI").astype(int)
+    obs_all = pd.DataFrame(obs_rows)
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric("Précision globale", f"{int(100*df['ok'].mean()) if len(df)>0 else 0}%")
-    with c2:
-        st.metric("Temps moyen (s)", f"{df['Temps_Seconds'].mean():.1f}")
-    with c3:
-        st.metric("Marge d'erreur moy.", f"{df['Marge_Erreur'].mean():.2f}")
+    # Typage via Parcours
+    if "Parcours_Id" in obs_all.columns:
+        pids = sorted({pid for pid in pd.Series(obs_all["Parcours_Id"]).dropna().tolist() if pid is not None})
+    else:
+        pids = []
+    type_by_pid = {}
+    if pids:
+        p_rows = (
+            supabase.table("Parcours")
+            .select("id, Type_Operation")
+            .in_("id", pids)
+            .execute().data or []
+        )
+        type_by_pid = {p["id"]: p["Type_Operation"] for p in p_rows}
+    obs_all["Type_Operation"] = obs_all["Parcours_Id"].map(type_by_pid).fillna("Inconnu")
 
-    st.subheader("Par opération")
-    synth = df.groupby("type").agg(
-        questions=("ok","count"),
-        accuracy=("ok","mean"),
-        temps_moyen=("Temps_Seconds","mean"),
-        marge_moy=("Marge_Erreur","mean")
-    ).reset_index()
+    # Merge dates d'entraînement
+    obs_all = obs_all.merge(entr_df.rename(columns={"id": "Entrainement_Id"}), on="Entrainement_Id", how="left")
 
-    if not synth.empty:
-        synth["accuracy"] = (synth["accuracy"]*100).round(0).astype(int)
-        synth["temps_moyen"] = synth["temps_moyen"].round(1)
-        synth["marge_moy"] = synth["marge_moy"].round(2)
-        st.dataframe(synth, use_container_width=True)
-        st.bar_chart(synth.set_index("type")[["accuracy","temps_moyen","marge_moy"]])
+    # Cast numeric / flags
+    obs_all["Temps_Seconds"] = pd.to_numeric(obs_all["Temps_Seconds"], errors="coerce")
+    obs_all["Marge_Erreur"]  = pd.to_numeric(obs_all["Marge_Erreur"],  errors="coerce")
+    obs_all["Score"]         = pd.to_numeric(obs_all["Score"],         errors="coerce").fillna(0)
+    obs_all["ok"]            = (obs_all["Etat"] == "VRAI").astype(int)
+    obs_all["Date"]          = pd.to_datetime(obs_all["Date"], errors="coerce")
 
-    if st.button("🏠 Retour à l'accueil"):
-        st.session_state.page = "home"; st.rerun()
+    # ✅ Historique GLOBAL pour le tableau du bas (indépendant des filtres)
+    obs_all_full = obs_all.copy()
+
+    # ----------------- Filtre opération & fenêtre (pour graph + régularité uniquement) -----------------
+    # Filtre opération
+    if op_choice != "Mixte":
+        obs_op = obs_all_full[obs_all_full["Type_Operation"] == op_choice]
+    else:
+        obs_op = obs_all_full
+
+    # Fenêtre temporelle
+    today = pd.Timestamp.today().normalize()
+    if fenetre_label == "Aujourd'hui":
+        start = today
+    elif fenetre_label == "Cette semaine":
+        start = today - pd.Timedelta(days=int(today.weekday()))  # lundi de la semaine courante
+    elif fenetre_label == "Ce mois-ci":
+        start = today.replace(day=1)
+    else:  # "Max"
+        start = entr_df["Date"].min().normalize()
+
+    # Données de la FENÊTRE (pour le graphique + régularité)
+    obs = obs_op[(obs_op["Date"] >= start) & (obs_op["Date"] <= today)]
+
+    # ----------------- Axe & KPI cumulées (sur la fenêtre) -----------------
+    if not obs.empty:
+        if axe == "Entraînements":
+            base = (
+                obs.groupby(["Entrainement_Id", "Date"])
+                .agg(
+                    score=("Score", "sum"),
+                    bonnes=("ok", "sum"),
+                    total=("ok", "count"),
+                    temps=("Temps_Seconds", "mean"),
+                    marge=("Marge_Erreur", "mean"),
+                )
+                .reset_index()
+                .sort_values("Date")
+            )
+            score_col = "score"
+        else:
+            base = obs[["Date", "Score", "ok", "Temps_Seconds", "Marge_Erreur"]].copy()
+            base = base.rename(columns={"ok": "bonnes", "Temps_Seconds": "temps", "Marge_Erreur": "marge"})
+            base["total"] = 1
+            base = base.sort_values("Date").reset_index(drop=True)
+            score_col = "Score"
+
+        # Cumuls
+        base["cum_score"]  = base[score_col].cumsum()
+        base["cum_bonnes"] = base["bonnes"].cumsum()
+        base["cum_total"]  = base["total"].cumsum()
+        base["cum_taux"]   = (base["cum_bonnes"] / base["cum_total"] * 100)
+
+        idx = pd.Series(range(1, len(base) + 1), index=base.index).astype(float)
+        base["cum_temps"]  = (pd.to_numeric(base.get("temps", 0), errors="coerce").fillna(0).cumsum() / idx)
+        base["cum_marge"]  = (pd.to_numeric(base.get("marge", 0), errors="coerce").fillna(0).cumsum() / idx)
+
+        # Choix KPI (cumulée)
+        if kpi == "Score net":
+            base["KPI"] = base["cum_score"]
+        elif kpi == "Taux de Réussite":
+            base["KPI"] = base["cum_taux"].round(0)
+        elif kpi == "Temps par op.":
+            base["KPI"] = base["cum_temps"].round(2)
+        else:  # Marge d'erreur
+            base["KPI"] = base["cum_marge"].round(2)
+
+        # X = rang du point (1..N) plutôt que la date
+        base["Point"] = range(1, len(base) + 1)
+        chart_df = base[["Point", "KPI"]].set_index("Point")
+
+        st.subheader(f"Évolution — {kpi} (axe: {axe}, fenêtre: {fenetre_label})")
+        if chart_df.shape[0] >= 2:
+            st.line_chart(chart_df, height=260)
+        elif chart_df.shape[0] == 1:
+            st.bar_chart(chart_df, height=220)
+            st.caption("Un seul point pour l’instant dans cette fenêtre.")
+        else:
+            st.info("Aucune donnée à afficher.")
+
+        if chart_df.shape[0] >= 1:
+            delta = float(chart_df["KPI"].iloc[-1] - (chart_df["KPI"].iloc[0] if chart_df.shape[0] > 1 else chart_df["KPI"].iloc[-1]))
+            if kpi == "Score net":
+                st.caption(f"Δ sur la fenêtre : **{int(delta)}**")
+            else:
+                st.caption(f"Δ sur la fenêtre : **{round(delta, 2)}**")
+    else:
+        st.info("Aucune donnée dans cette fenêtre/filtre.")
+
+    st.markdown("---")
+
+    # ----------------- Régularité (dans la fenêtre) -----------------
+    st.subheader("Régularité")
+    days = pd.date_range(start, today, freq="D")
+
+    if not obs.empty:
+        obs_per_day = (
+            obs.groupby(obs["Date"].dt.normalize())
+            .size()
+            .reindex(days, fill_value=0)
+            .rename("Observations")
+        )
+    else:
+        obs_per_day = pd.Series(0, index=days, name="Observations")
+
+    st.caption("Observations par jour")
+    st.bar_chart(obs_per_day, height=160)
+
+    streak_vals, cur = [], 0
+    for v in obs_per_day.values:
+        if v > 0:
+            cur += 1
+        else:
+            cur = 0
+        streak_vals.append(cur)
+    streak = pd.Series(streak_vals, index=days, name="Streak")
+    st.caption("Évolution de la série (jours consécutifs actifs)")
+    st.line_chart(streak.to_frame(), height=160)
+
+    st.markdown("---")
+
+    # ----------------- État actuel par niveau (GLOBAL, indépendant des filtres) -----------------
+    st.subheader("État actuel par niveau")
+
+    if obs_all_full.empty:
+        st.info("Aucune observation enregistrée pour l’instant.")
+    else:
+        # 1) Agréger toutes les observations par niveau (Parcours_Id)
+        per_pid = (
+            obs_all_full
+            .dropna(subset=["Parcours_Id"])
+            .groupby("Parcours_Id")
+            .agg(
+                Volume=("ok", "count"),                     # nb d'observations
+                Taux_reussite=("ok", "mean"),               # % de VRAI
+                Temps_s=("Temps_Seconds", "mean"),          # temps moyen (s)
+                Marge=("Marge_Erreur", "mean"),             # marge moyenne
+            )
+            .reset_index()
+        )
+
+        if per_pid.empty:
+            st.info("Aucune observation rattachée à un niveau.")
+        else:
+            # 2) Récupérer les métadonnées des niveaux
+            pids = per_pid["Parcours_Id"].tolist()
+            pmeta = (
+                supabase.table("Parcours")
+                .select("id, Niveau, Type_Operation")
+                .in_("id", pids)
+                .execute().data or []
+            )
+            import pandas as pd
+            pmeta_df = pd.DataFrame(pmeta)
+
+            # 3) Merge et formatage final
+            df_state = (
+                per_pid.merge(pmeta_df, left_on="Parcours_Id", right_on="id", how="left")
+                .rename(columns={
+                    "Type_Operation": "Opération",
+                    "Niveau": "Niveau",
+                    "Taux_reussite": "Taux de Réussite",
+                    "Temps_s": "Temps (s)",
+                    "Marge": "Marge d'erreur",
+                })
+            )
+
+            # Arrondis / formats
+            df_state["Taux de Réussite"] = (df_state["Taux de Réussite"] * 100).round(0).astype("Int64")
+            df_state["Temps (s)"] = pd.to_numeric(df_state["Temps (s)"], errors="coerce").round(2)
+            df_state["Marge d'erreur"] = pd.to_numeric(df_state["Marge d'erreur"], errors="coerce").round(2)
+
+            # Colonnes et tri (comme sur ta maquette)
+            df_state = df_state[["Niveau", "Opération", "Volume", "Taux de Réussite", "Temps (s)", "Marge d'erreur"]]
+            # (si Niveau est numérique, le tri sera correct ; sinon on peut caster en numeric)
+            df_state = df_state.sort_values(["Opération", "Niveau"], ascending=[True, True])
+
+            # 4) Affichage
+            st.dataframe(df_state, use_container_width=True, hide_index=True)
 
 def classement_page():
     st.title("🏆 Classement des Pixel-Monstres")
@@ -1298,9 +1492,7 @@ elif st.session_state.page == "correction":
     correction_page()
 elif st.session_state.page == "classement":
     classement_page()
-elif st.session_state.page == "analyse":
-    analyse_page()
 elif st.session_state.page == "training_lobby":
     training_lobby_page()
 elif st.session_state.page == "progression":
-    analyse_page()  # ou ta page progression si tu l'as renommée/simplifiée
+    progression_page()
