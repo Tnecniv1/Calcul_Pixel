@@ -1,5 +1,5 @@
 // src/screens/ResultScreen.tsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, useRef } from "react";
 import {
   View,
   Text,
@@ -8,22 +8,14 @@ import {
   SafeAreaView,
   ActivityIndicator,
   Alert,
+  Animated,
+  Easing,
 } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import type { RootStackParamList } from "../../App";
 import { theme } from "../theme";
-import Constants from "expo-constants";
 import { supabase } from "../supabase";
-
-/* =========================================================================
-   Config
-   ========================================================================= */
-const API_BASE: string =
-  // @ts-ignore — suivant Expo SDK
-  (Constants?.expoConfig?.extra?.API_BASE_URL as string) ||
-  // @ts-ignore — fallback anciens SDK
-  (Constants?.manifest?.extra?.API_BASE_URL as string) ||
-  "http://192.168.1.16:8000";
+import { checkAndUnlockBadges, CheckBadgesResult, BadgeDefinition } from "../services/badgeService";
 
 /* =========================================================================
    Types
@@ -142,7 +134,7 @@ const makeEmptyMetrics = (): MetricsResponse => ({
 });
 
 /* =========================================================================
-   UI — composants visuels
+   UI – composants visuels
    ========================================================================= */
 
 // En-tête de section
@@ -190,6 +182,85 @@ const StatRow = ({
   );
 };
 
+// Composant Badge animé avec effet pulse/bounce
+const AnimatedBadgeItem = ({ badge, index }: { badge: BadgeDefinition; index: number }) => {
+  const scaleAnim = useRef(new Animated.Value(0)).current;
+  const rotateAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    // Délai basé sur l'index pour un effet cascade
+    const delay = index * 150;
+
+    Animated.sequence([
+      Animated.delay(delay),
+      Animated.parallel([
+        // Animation de scale avec rebond
+        Animated.spring(scaleAnim, {
+          toValue: 1,
+          friction: 4,
+          tension: 100,
+          useNativeDriver: true,
+        }),
+        // Légère rotation pour l'effet "pop"
+        Animated.sequence([
+          Animated.timing(rotateAnim, {
+            toValue: 1,
+            duration: 150,
+            easing: Easing.out(Easing.ease),
+            useNativeDriver: true,
+          }),
+          Animated.timing(rotateAnim, {
+            toValue: 0,
+            duration: 150,
+            easing: Easing.inOut(Easing.ease),
+            useNativeDriver: true,
+          }),
+        ]),
+      ]),
+    ]).start();
+
+    // Animation de pulsation continue
+    const pulseLoop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(scaleAnim, {
+          toValue: 1.08,
+          duration: 800,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(scaleAnim, {
+          toValue: 1,
+          duration: 800,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ])
+    );
+
+    const timeout = setTimeout(() => pulseLoop.start(), delay + 400);
+    return () => clearTimeout(timeout);
+  }, [index, scaleAnim, rotateAnim]);
+
+  const rotate = rotateAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '15deg'],
+  });
+
+  return (
+    <Animated.View
+      style={[
+        styles.newBadgeItem,
+        {
+          transform: [{ scale: scaleAnim }, { rotate }],
+        },
+      ]}
+    >
+      <Text style={styles.newBadgeEmoji}>{badge.emoji}</Text>
+      <Text style={styles.newBadgeName}>{badge.name}</Text>
+    </Animated.View>
+  );
+};
+
 const OperationCard = ({ title, data }: { title: OperationKey; data: OperationMetrics }) => (
   <View style={styles.card}>
     <SectionHeader title={title} />
@@ -209,7 +280,7 @@ const OperationCard = ({ title, data }: { title: OperationKey; data: OperationMe
       />
       <StatRow
         icon="⚡"
-        label="Marge d’erreur"
+        label="Marge d'erreur"
         valueText={`${Math.round(data.errorMargin || 0)} %`}
         progress={Math.min(1, (data.errorMargin || 0) / 100)}
       />
@@ -221,14 +292,35 @@ const OperationCard = ({ title, data }: { title: OperationKey; data: OperationMe
    Screen
    ========================================================================= */
 export default function ResultScreen({ route, navigation }: Props) {
-  const { type, entrainementId, parcoursId, score } = route.params;
+  const { entrainementId, parcoursId, score, mistakes, total } = route.params;
 
   const [loading, setLoading] = useState(true);
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sessionScore, setSessionScore] = useState<number | null>(null);
+  const [newBadges, setNewBadges] = useState<BadgeDefinition[]>([]);
 
   const ui = useMemo(() => (metrics ? normalizeBarTimes(metrics) : makeEmptyMetrics()), [metrics]);
+
+  // 🏆 Vérifier les badges après chargement des métriques
+  useEffect(() => {
+    if (!metrics || loading) return;
+
+    const checkBadges = async () => {
+      try {
+        console.log('[ResultScreen] Vérification des badges...');
+        const badgeResult = await checkAndUnlockBadges();
+        if (badgeResult && badgeResult.newly_unlocked && badgeResult.newly_unlocked.length > 0) {
+          console.log('[ResultScreen] Nouveaux badges débloqués:', badgeResult.newly_unlocked);
+          setNewBadges(badgeResult.newly_unlocked);
+        }
+      } catch (error) {
+        console.error('[ResultScreen] Erreur badges:', error);
+      }
+    };
+
+    checkBadges();
+  }, [metrics, loading]);
 
   useEffect(() => {
     let alive = true;
@@ -268,7 +360,7 @@ export default function ResultScreen({ route, navigation }: Props) {
     };
   }, [entrainementId]);
 
-  const effectiveScore = sessionScore ?? score; // ce qui s’affiche en haut
+  const effectiveScore = sessionScore ?? score;
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -291,7 +383,21 @@ export default function ResultScreen({ route, navigation }: Props) {
           </Text>
         </View>
 
-        {/* CARTES — zone centrale compacte */}
+        {/* NOUVEAUX BADGES DÉBLOQUÉS */}
+        {newBadges.length > 0 && (
+          <View style={styles.newBadgesCard}>
+            <Text style={styles.newBadgesTitle}>
+              🎉 {newBadges.length > 1 ? "Nouveaux badges !" : "Nouveau badge !"}
+            </Text>
+            <View style={styles.newBadgesList}>
+              {newBadges.map((badge, index) => (
+                <AnimatedBadgeItem key={badge.badge_id} badge={badge} index={index} />
+              ))}
+            </View>
+          </View>
+        )}
+
+        {/* CARTES – zone centrale compacte */}
         <View style={styles.cardsArea}>
           {loading ? (
             <View style={{ alignItems: "center", paddingVertical: 8 }}>
@@ -326,7 +432,7 @@ export default function ResultScreen({ route, navigation }: Props) {
           </TouchableOpacity>
 
           <TouchableOpacity
-            onPress={() => navigation.navigate("Review", { type, entrainementId })}
+            onPress={() => navigation.navigate("Review", { entrainementId, mistakes })}
             activeOpacity={0.9}
             style={styles.btnPrimary}
           >
@@ -381,6 +487,43 @@ const styles = StyleSheet.create({
   bigScore: { fontSize: 28, fontWeight: "900", letterSpacing: 0.2 },
   bigScorePos: { color: COLORS.green },
   bigScoreNeg: { color: COLORS.red },
+
+  /* ----- Nouveaux badges ----- */
+  newBadgesCard: {
+    backgroundColor: "rgba(255,215,61,0.12)",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(255,215,61,0.3)",
+    padding: 12,
+    marginBottom: 6,
+    alignItems: "center",
+  },
+  newBadgesTitle: {
+    fontSize: 14,
+    fontWeight: "900",
+    color: "#FFD93D",
+    marginBottom: 8,
+  },
+  newBadgesList: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "center",
+    gap: 12,
+  },
+  newBadgeItem: {
+    alignItems: "center",
+    gap: 4,
+  },
+  newBadgeEmoji: {
+    fontSize: 32,
+  },
+  newBadgeName: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: COLORS.textMain,
+    textAlign: "center",
+    maxWidth: 80,
+  },
 
   /* ----- Zone cartes compacte ----- */
   cardsArea: {

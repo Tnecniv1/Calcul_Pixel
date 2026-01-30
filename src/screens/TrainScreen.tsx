@@ -7,7 +7,6 @@ import {
   StyleSheet,
   Platform,
   Dimensions,
-  Modal,
 } from "react-native";
 import Timer from "../components/Timer";
 import Calculator from "../components/Calculator";
@@ -17,21 +16,14 @@ import {
   startEntrainementMixte,
   genererExercicesMixte,
   postObservationsBatch,
-  getPixelState,          // ← on importe la même API que sur HomeScreen
   type ObservationIn,
 } from "../api";
-import BigPixel from "../components/BigPixel";
 
 const { width: W, height: H } = Dimensions.get("window");
 
-// Layout (inchangé)
+// Layout
 const PAD_W = Math.min(W * 0.8, 350);
 const PAD_H_MAX = Math.round(H * 0.52);
-
-// Animation (lente et lisible)
-const HEADSTART_MS = 90; // pause pour lire le score
-const STEP_MS = 90;       // 200ms par pixel (±30 ≈ 6s)
-const END_PAUSE_MS = 400;  // souffle avant redirection
 
 export default function TrainScreen(props: any) {
   const volume: number = props?.route?.params?.volume ?? 30;
@@ -64,11 +56,6 @@ export default function TrainScreen(props: any) {
     }[]
   >([]);
 
-  // Overlay d’animation
-  const [overlayVisible, setOverlayVisible] = useState(false);
-  const [overlayScoreLeft, setOverlayScoreLeft] = useState<number>(0);
-  const [overlayLit, setOverlayLit] = useState<number>(0);
-  const postPromiseRef = useRef<Promise<void> | null>(null);
 
   // INIT
   useEffect(() => {
@@ -156,78 +143,28 @@ export default function TrainScreen(props: any) {
       setI((k) => k + 1);
       nextTick();
     } else {
-      // Fin de session : post + récupération du lit actuel + overlay
+      // Fin de session : post et redirection directe vers ResultScreen
       (async () => {
         try {
           setState("posting");
-          postPromiseRef.current = postObservationsBatch(obsBuf.current);
+          await postObservationsBatch(obsBuf.current);
         } catch (e: any) {
           setErr(`Erreur envoi résultats: ${e?.message ?? e}`);
         } finally {
-          // 1) on lit le lit actuel (comme sur HomeScreen)
-          let baseLit = 0;
-          try {
-            const data = await getPixelState();
-            baseLit = Number(data?.lit) || 0;
-          } catch {
-            baseLit = 0;
-          }
-
-          // 2) on démarre l’overlay à partir de ce lit réel
-          const delta = Math.max(-30, Math.min(30, Math.trunc(score)));
-          setOverlayLit(baseLit);
-          setOverlayScoreLeft(delta);
-          setOverlayVisible(true);
+          setState("ready");
+          navigation?.replace("Result", {
+            type: "Addition",
+            entrainementId: entrainementIdRef.current!,
+            parcoursId: exos[0]?.Parcours_Id || 0,
+            score,
+            total: exos.length,
+            mistakes: mistakesRef.current,
+          });
         }
       })();
     }
-  }, [i, exos, answer, score]);
+  }, [i, exos, answer, score, navigation]);
 
-  // Animation + redirection
-  useEffect(() => {
-    if (!overlayVisible) return;
-    let cancelled = false;
-    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-    const run = async () => {
-      await sleep(HEADSTART_MS);
-
-      let cur = overlayLit;
-      let left = overlayScoreLeft;
-
-      while (!cancelled && left !== 0) {
-        const dir = left > 0 ? +1 : -1;
-        cur = Math.max(0, cur + dir);
-        left = left - dir;
-        setOverlayLit(cur);
-        setOverlayScoreLeft(left);
-        await sleep(STEP_MS);
-      }
-
-      if (cancelled) return;
-
-      await sleep(END_PAUSE_MS);
-      try {
-        await postPromiseRef.current;
-      } catch {}
-      setState("ready");
-      setOverlayVisible(false);
-
-      navigation?.replace("Result", {
-        type: "Addition",
-        entrainementId: entrainementIdRef.current!,
-        parcoursId: 0,
-        score,
-        total: exos.length,
-        mistakes: mistakesRef.current,
-      });
-    };
-
-    run();
-    return () => {
-      cancelled = true;
-    };
-  }, [overlayVisible, overlayLit, overlayScoreLeft, exos.length, navigation]);
 
   // UI
   const current = exos[i];
@@ -284,26 +221,6 @@ export default function TrainScreen(props: any) {
       </View>
 
       {err && <Text style={styles.errorText}>{err}</Text>}
-
-      {/* OVERLAY : score + BigPixel (mêmes proportions que Home) */}
-      <Modal visible={overlayVisible} animationType="fade" transparent>
-        <View style={styles.overlayBackdrop}>
-          <View style={styles.overlayContainer}>
-            <View
-              style={[
-                styles.scorePill,
-                overlayScoreLeft >= 0 ? styles.pos : styles.neg,
-              ]}
-            >
-              <Text style={styles.scoreText}>
-                {overlayScoreLeft > 0 ? `+${overlayScoreLeft}` : `${overlayScoreLeft}`}
-              </Text>
-            </View>
-
-            <BigPixel lit={overlayLit} cols={350} rows={350} size={350} />
-          </View>
-        </View>
-      </Modal>
     </View>
   );
 }
@@ -372,30 +289,4 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     overflow: "hidden",
   },
-
-  // Overlay
-  overlayBackdrop: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.45)",
-    justifyContent: "center",
-    alignItems: "center",
-    padding: 16,
-  },
-  overlayContainer: {
-    width: "100%",
-    maxWidth: 420,
-    alignItems: "center",
-  },
-  scorePill: {
-    position: "absolute",
-    right: 8,
-    top: 8,
-    zIndex: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 999,
-  },
-  scoreText: { color: "white", fontWeight: "800", fontSize: 18 },
-  pos: { backgroundColor: "#16A34A" },
-  neg: { backgroundColor: "#DC2626" },
 });

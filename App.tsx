@@ -14,10 +14,14 @@ import ProgressionScreen from "./src/screens/ProgressionScreen";
 import LeaderboardScreen from "./src/screens/LeaderboardScreen";
 import InfoScreen from "./src/screens/InfoScreen";
 import SignUpScreen from "./src/screens/SignUpScreen";
-import PaywallScreen from "./src/screens/PaywallScreen"; 
+import PaywallScreen from "./src/screens/PaywallScreen";
 import ForgotPasswordScreen from './src/screens/ForgotPasswordScreen';
+import GlobalChatScreen from "./src/screens/GlobalChatScreen";
+import ProfileScreen from "./src/screens/ProfileScreen";
+import BadgesScreen from "./src/screens/BadgesScreen";
 
 import { AuthProvider, useAuth } from "./src/auth";
+import { useNotifications } from "./src/hooks/useNotifications";
 
 import Purchases from "react-native-purchases";
 import Constants from "expo-constants";
@@ -27,7 +31,7 @@ async function initRevenueCat(userId?: string) {
   try {
     const extra: any = Constants?.expoConfig?.extra ?? {};
 
-    // Feature flag: n’active RC que si RC_ENABLED=true (env ou app.json.extra)
+    // Feature flag: n'active RC que si RC_ENABLED=true (env ou app.json.extra)
     const enabledEnv = `${process.env.EXPO_PUBLIC_RC_ENABLED ?? ""}`.toLowerCase();
     const enabled =
       extra?.RC_ENABLED === true ||
@@ -87,9 +91,10 @@ export type RootStackParamList = {
   };
   Progression: { parcoursId: number };
   Leaderboard: undefined;
+  GlobalChat: undefined;
+  Profile: undefined;
+  Badges: undefined;
   Info: undefined;
-
-
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -97,6 +102,21 @@ const Stack = createNativeStackNavigator<RootStackParamList>();
 /* --------------------------- Router --------------------------- */
 function Router() {
   const { authUid, loading } = useAuth();
+
+  // ✨ Initialiser les notifications
+  const { expoPushToken, notification } = useNotifications();
+
+  useEffect(() => {
+    if (expoPushToken) {
+      console.log('[Notifications] Token enregistré:', expoPushToken);
+    }
+  }, [expoPushToken]);
+
+  useEffect(() => {
+    if (notification) {
+      console.log('[Notifications] Notification reçue:', notification);
+    }
+  }, [notification]);
 
   useEffect(() => {
     // Init RevenueCat (feature-flag)
@@ -119,13 +139,11 @@ function Router() {
           component={SignUpScreen}
           options={{ title: "Créer un compte" }}
         />
-
         <Stack.Screen 
           name="ForgotPassword" 
           component={ForgotPasswordScreen} 
           options={{ title: "Mot de passe oublié" }} 
-          />
-
+        />
       </Stack.Navigator>
     );
   }
@@ -141,7 +159,7 @@ function Router() {
         name="Paywall"
         component={PaywallScreen}
         options={{ title: "Abonnement"}}
-        />
+      />
       <Stack.Screen
         name="Entrainement"
         component={EntrainementScreen}
@@ -166,6 +184,21 @@ function Router() {
         name="Leaderboard"
         component={LeaderboardScreen}
         options={{ title: "Classement" }}
+      />
+      <Stack.Screen
+        name="GlobalChat"
+        component={GlobalChatScreen}
+        options={{ title: "Discussion" }}
+      />
+      <Stack.Screen
+        name="Profile"
+        component={ProfileScreen}
+        options={{ title: "Mon Profil" }}
+      />
+      <Stack.Screen
+        name="Badges"
+        component={BadgesScreen}
+        options={{ title: "Mes Badges" }}
       />
       <Stack.Screen
         name="Progression"

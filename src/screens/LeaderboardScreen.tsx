@@ -8,25 +8,89 @@ import {
   FlatList,
   TouchableOpacity,
   RefreshControl,
+  Image,
 } from "react-native";
 import { theme } from "../theme";
-import { supabase } from "../supabase"; // garde ce chemin
+import { supabase } from "../supabase";
 
 type Scope = "all" | "this_week";
 
 type RpcRow = {
   user_id: number;
   display_name: string | null;
+  avatar_url: string | null;
   score_total: number;
-  // pixel_ratio retiré volontairement
 };
 
 type Item = {
   user_id: number;
   rank: number;
   display_name: string | null;
+  avatar_url: string | null;
   score_total: number;
 };
+
+// ============================================
+// COMPOSANT AVATAR
+// ============================================
+
+type AvatarProps = {
+  uri: string | null;
+  name: string;
+  size: number;
+  rank: number;
+};
+
+function Avatar({ uri, name, size, rank }: AvatarProps) {
+  // Couleurs speciales pour le podium
+  const getPodiumColor = (r: number) => {
+    if (r === 1) return "#FFD700"; // Or
+    if (r === 2) return "#C0C0C0"; // Argent
+    if (r === 3) return "#CD7F32"; // Bronze
+    return null;
+  };
+
+  // Generer une couleur basee sur le nom
+  const getColor = (str: string) => {
+    const colors = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7", "#DDA0DD", "#98D8C8"];
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      hash = str.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    return colors[Math.abs(hash) % colors.length];
+  };
+
+  const initial = (name || "U")[0].toUpperCase();
+  const bgColor = getPodiumColor(rank) || getColor(name || "User");
+  const podiumBorder = getPodiumColor(rank);
+
+  if (uri) {
+    return (
+      <View style={podiumBorder ? [styles.avatarBorder, { borderColor: podiumBorder }] : undefined}>
+        <Image
+          source={{ uri }}
+          style={[styles.avatar, { width: size, height: size, borderRadius: size / 2 }]}
+        />
+      </View>
+    );
+  }
+
+  return (
+    <View
+      style={[
+        styles.avatarPlaceholder,
+        { width: size, height: size, borderRadius: size / 2, backgroundColor: bgColor },
+        podiumBorder && styles.avatarPodium,
+      ]}
+    >
+      <Text style={[styles.avatarInitial, { fontSize: size * 0.4 }]}>{initial}</Text>
+    </View>
+  );
+}
+
+// ============================================
+// ECRAN PRINCIPAL
+// ============================================
 
 export default function LeaderboardScreen() {
   const [scope, setScope] = React.useState<Scope>("all");
@@ -39,18 +103,41 @@ export default function LeaderboardScreen() {
       setLoading(true);
       setError(null);
 
-      const { data, error } = await supabase.rpc("get_leaderboard_with_names", {
+      // Essayer d'abord la RPC avec avatar
+      const { data, error: rpcError } = await supabase.rpc("get_leaderboard_with_names", {
         p_limit: 100,
         p_weekly: scope === "this_week",
       });
-      if (error) throw error;
+
+      if (rpcError) throw rpcError;
 
       const rows = (data ?? []) as RpcRow[];
 
-      const mapped: Item[] = rows.map((r, i) => ({
+      // Si la RPC ne retourne pas avatar_url, on enrichit avec users_map
+      let enrichedRows = rows;
+      if (rows.length > 0 && rows[0].avatar_url === undefined) {
+        const userIds = rows.map((r) => r.user_id);
+        const { data: avatarData } = await supabase
+          .from("users_map")
+          .select("user_id, avatar_url, display_name")
+          .in("user_id", userIds);
+
+        const avatarMap = new Map(
+          (avatarData || []).map((a) => [a.user_id, { avatar_url: a.avatar_url, display_name: a.display_name }])
+        );
+
+        enrichedRows = rows.map((r) => ({
+          ...r,
+          avatar_url: avatarMap.get(r.user_id)?.avatar_url || null,
+          display_name: r.display_name || avatarMap.get(r.user_id)?.display_name || null,
+        }));
+      }
+
+      const mapped: Item[] = enrichedRows.map((r, i) => ({
         user_id: r.user_id,
         rank: i + 1,
         display_name: r.display_name,
+        avatar_url: r.avatar_url || null,
         score_total: r.score_total,
       }));
 
@@ -70,6 +157,40 @@ export default function LeaderboardScreen() {
   const renderName = (it: Item) =>
     (it.display_name && it.display_name.trim()) || `User #${it.user_id}`;
 
+  const renderItem = React.useCallback(
+    ({ item }: { item: Item }) => (
+      <View style={[styles.row, item.rank <= 3 && styles.rowPodium]}>
+        {/* Position */}
+        <View style={styles.rankContainer}>
+          <Text style={[styles.rank, item.rank <= 3 && styles.rankPodium]}>
+            {item.rank}
+          </Text>
+        </View>
+
+        {/* Avatar */}
+        <Avatar
+          uri={item.avatar_url}
+          name={renderName(item)}
+          size={40}
+          rank={item.rank}
+        />
+
+        {/* Nom */}
+        <View style={styles.nameContainer}>
+          <Text style={[styles.name, item.rank <= 3 && styles.namePodium]} numberOfLines={1}>
+            {renderName(item)}
+          </Text>
+        </View>
+
+        {/* Score */}
+        <Text style={[styles.score, item.rank <= 3 && styles.scorePodium]}>
+          {item.score_total.toLocaleString()}
+        </Text>
+      </View>
+    ),
+    []
+  );
+
   return (
     <SafeAreaView style={styles.safe}>
       {/* Onglets */}
@@ -83,7 +204,7 @@ export default function LeaderboardScreen() {
             (loading || scope === "all") && styles.tabDisabled,
           ]}
         >
-          <Text style={styles.tabText}>Tous</Text>
+          <Text style={[styles.tabText, scope === "all" && styles.tabTextActive]}>Tous</Text>
         </TouchableOpacity>
         <TouchableOpacity
           onPress={() => setScope("this_week")}
@@ -94,50 +215,41 @@ export default function LeaderboardScreen() {
             (loading || scope === "this_week") && styles.tabDisabled,
           ]}
         >
-          <Text style={styles.tabText}>Semaine</Text>
+          <Text style={[styles.tabText, scope === "this_week" && styles.tabTextActive]}>Semaine</Text>
         </TouchableOpacity>
       </View>
 
-      {/* En-tête (Pixel retiré) */}
-      <View style={styles.headerRow}>
-        <Text style={[styles.headerCell, { flex: 0.6 }]}>Pos</Text>
-        <Text style={[styles.headerCell, { flex: 2 }]}>Joueur</Text>
-        <Text style={[styles.headerCell, { flex: 1 }]}>Score</Text>
-      </View>
-
-      {/* Liste (Pixel retiré) */}
+      {/* Liste */}
       <FlatList
         data={items}
         keyExtractor={(it) => String(it.user_id)}
         refreshControl={
           <RefreshControl refreshing={loading} onRefresh={load} tintColor={theme.colors.text} />
         }
-        contentContainerStyle={{ paddingBottom: 12 }}
+        contentContainerStyle={styles.listContent}
         ListEmptyComponent={
           !loading ? (
-            <View style={{ paddingVertical: 24 }}>
+            <View style={styles.emptyContainer}>
               <Text style={styles.emptyText}>
-                {error ?? "Aucun résultat pour cette vue."}
+                {error ?? "Aucun resultat pour cette vue."}
               </Text>
             </View>
           ) : null
         }
-        renderItem={({ item }) => (
-          <View style={styles.row}>
-            <Text style={[styles.cell, { flex: 0.6 }]}>{item.rank}</Text>
-            <Text style={[styles.cell, { flex: 2 }]}>{renderName(item)}</Text>
-            <Text style={[styles.cell, { flex: 1 }]}>{item.score_total}</Text>
-          </View>
-        )}
+        renderItem={renderItem}
+        showsVerticalScrollIndicator={false}
       />
     </SafeAreaView>
   );
 }
 
+// ============================================
+// STYLES
+// ============================================
+
 const styles = StyleSheet.create({
   safe: {
     flex: 1,
-    padding: 16,
     backgroundColor: theme.colors.bg,
   },
 
@@ -145,18 +257,21 @@ const styles = StyleSheet.create({
   tabs: {
     flexDirection: "row",
     gap: 8,
-    marginBottom: 12,
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 12,
   },
   tab: {
-    paddingVertical: 6,
-    paddingHorizontal: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 16,
     borderWidth: 1,
     borderColor: theme.colors.border,
-    borderRadius: 8,
+    borderRadius: 20,
     backgroundColor: theme.colors.card,
   },
   tabActive: {
     backgroundColor: theme.colors.accent,
+    borderColor: theme.colors.accent,
   },
   tabDisabled: {
     opacity: 0.6,
@@ -164,27 +279,104 @@ const styles = StyleSheet.create({
   tabText: {
     color: theme.colors.text,
     fontWeight: "600",
+    fontSize: 14,
+  },
+  tabTextActive: {
+    color: theme.colors.bg,
   },
 
-  // Tableau
-  headerRow: {
-    flexDirection: "row",
-    paddingVertical: 6,
-    borderBottomWidth: 1,
-    borderColor: theme.colors.border,
+  // Liste
+  listContent: {
+    paddingHorizontal: 16,
+    paddingBottom: 24,
   },
-  headerCell: {
-    color: theme.colors.text,
-    opacity: 0.8,
-    fontWeight: "700",
-  },
+
+  // Row
   row: {
     flexDirection: "row",
-    paddingVertical: 10,
+    alignItems: "center",
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    marginBottom: 8,
+    backgroundColor: theme.colors.card,
+    borderRadius: 12,
+    gap: 12,
+  },
+  rowPodium: {
+    borderWidth: 1,
+    borderColor: theme.colors.accent + "40",
+  },
+
+  // Rank
+  rankContainer: {
+    width: 28,
     alignItems: "center",
   },
-  cell: {
+  rank: {
     color: theme.colors.text,
+    fontSize: 16,
+    fontWeight: "600",
+    opacity: 0.7,
+  },
+  rankPodium: {
+    opacity: 1,
+    fontWeight: "800",
+    fontSize: 18,
+  },
+
+  // Avatar
+  avatar: {
+    backgroundColor: theme.colors.border,
+  },
+  avatarPlaceholder: {
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  avatarInitial: {
+    color: "#FFF",
+    fontWeight: "700",
+  },
+  avatarBorder: {
+    borderWidth: 2,
+    borderRadius: 22,
+    padding: 1,
+  },
+  avatarPodium: {
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.3)",
+  },
+
+  // Name
+  nameContainer: {
+    flex: 1,
+  },
+  name: {
+    color: theme.colors.text,
+    fontSize: 15,
+    fontWeight: "500",
+  },
+  namePodium: {
+    fontWeight: "700",
+  },
+
+  // Score
+  score: {
+    color: theme.colors.secondary,
+    fontSize: 15,
+    fontWeight: "600",
+    minWidth: 60,
+    textAlign: "right",
+  },
+  scorePodium: {
+    color: theme.colors.accent,
+    fontWeight: "800",
+    fontSize: 16,
+  },
+
+  // Empty
+  emptyContainer: {
+    paddingVertical: 48,
+    alignItems: "center",
   },
   emptyText: {
     textAlign: "center",

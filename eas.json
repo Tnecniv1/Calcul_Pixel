@@ -19,6 +19,19 @@
     }
   },
   "submit": {
-    "production": {}
+    "preview": {
+      "ios": {
+        "appleId": "vincentlebarbey@monstro.fr",
+        "ascAppId": "6751473681",
+        "appleTeamId": "HL2LLNRKVB"
+      }
+    },
+    "production": {
+      "ios": {
+        "appleId": "vincentlebarbey@monstro.fr",
+        "ascAppId": "6751473681",
+        "appleTeamId": "HL2LLNRKVB"
+      }
+    }
   }
 }

@@ -1,9 +1,9 @@
 {
   "expo": {
-    "name": "pixel-mobile",
+    "name": "pixel",
     "slug": "pixel-mobile",
     "scheme": "pixelcalc",
-    "version": "1.0.3",
+    "version": "1.0.7",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -22,6 +22,7 @@
       "supportsTablet": true,
       "usesAppleSignIn": true,
       "infoPlist": {
+        "UIBackgroundModes": ["remote-notification"],
         "ITSAppUsesNonExemptEncryption": false,
         "CFBundleURLTypes": [
           {
@@ -64,7 +65,8 @@
       "expo-audio",
       "expo-asset",
       "expo-web-browser",
-      "expo-apple-authentication"
+      "expo-apple-authentication",
+      "expo-notifications"
     ],
 
     "owner": "vcent.1",
@@ -74,5 +76,3 @@
     }
   }
 }
-
-

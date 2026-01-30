@@ -21,6 +21,7 @@ import type { RootStackParamList } from "../../App";
 import { fetchWithSupabaseAuth } from "../api";
 import { useRoute } from "@react-navigation/native";
 import type { RouteProp } from "@react-navigation/native";
+import SubscriptionModal from "../components/SubscriptionModal";
 
 /** ---------- Types & route ---------- */
 type Props = NativeStackScreenProps<RootStackParamList, "Entrainement">;
@@ -46,9 +47,7 @@ type Positions = {
 
 /** ---------- Config ---------- */
 const API_BASE: string =
-  // Expo SDK 50+
   (Constants?.expoConfig?.extra?.API_BASE_URL as string) ||
-  // Expo SDK < 50
   (Constants as any)?.manifest?.extra?.API_BASE_URL ||
   "";
 
@@ -66,37 +65,60 @@ async function hasActiveEntitlement(): Promise<boolean> {
   }
 }
 
-/** Vrai si l’essai local (3 jours) est encore en cours. Normalise s→ms et réécrit en ms. */
+/** Vrai si l'essai local (3 jours) est encore en cours */
 async function isInLocalTrial(): Promise<boolean> {
+  // 🚀 Mode développement : toujours actif
+  if (__DEV__ || Constants.appOwnership === 'expo') {
+    console.log('[Trial] Mode développement : essai infini activé');
+    return true;
+  }
+
   const nowMs = Date.now();
   const raw = await AsyncStorage.getItem(TRIAL_KEY);
 
+  // Pas d'essai démarré → on le démarre maintenant
   if (!raw) {
     await AsyncStorage.setItem(TRIAL_KEY, String(nowMs));
+    console.log('[Trial] 🆕 Nouveau démarrage essai');
     return true;
   }
 
-  let started = Number(raw);
-  if (!Number.isFinite(started) || started <= 0) {
+  // Conversion en nombre
+  let startedMs = Number(raw);
+  if (!Number.isFinite(startedMs) || startedMs <= 0) {
     await AsyncStorage.setItem(TRIAL_KEY, String(nowMs));
+    console.log('[Trial] 🔄 Réinitialisation (valeur invalide)');
     return true;
   }
 
-  // Normaliser l’unité : si ça ressemble à des secondes, convertir en ms
-  if (started < 1e12) {
-    started = started * 1000;
-    // Réécrire en ms pour stabiliser définitivement
-    await AsyncStorage.setItem(TRIAL_KEY, String(started));
+  // Normaliser : si c'est en secondes, convertir en millisecondes
+  if (startedMs < 1e12) {
+    startedMs = startedMs * 1000;
+    await AsyncStorage.setItem(TRIAL_KEY, String(startedMs));
+    console.log('[Trial] 🔄 Conversion s → ms');
   }
 
-  const days = Math.floor((nowMs - started) / (24 * 60 * 60 * 1000));
-  return days < TRIAL_DAYS;
+  // Calcul des jours écoulés
+  const elapsedMs = nowMs - startedMs;
+  const days = Math.floor(elapsedMs / (24 * 60 * 60 * 1000));
+  const isActive = days < TRIAL_DAYS;
+  
+  console.log(`[Trial] ⏰ Jour ${days}/${TRIAL_DAYS} - Actif: ${isActive ? '✅' : '❌'}`);
+  
+  return isActive;
 }
 
-/** Autorise à jouer si essai local actif OU abonnement actif. Essai prioritaire. */
+/** Autorise à jouer si essai actif OU abonnement actif */
 async function canStartTraining(): Promise<boolean> {
-  if (await isInLocalTrial()) return true;
-  return await hasActiveEntitlement();
+  const trialActive = await isInLocalTrial();
+  if (trialActive) {
+    console.log('[Access] ✅ Autorisé (essai actif)');
+    return true;
+  }
+  
+  const hasSubscription = await hasActiveEntitlement();
+  console.log(`[Access] ${hasSubscription ? '✅' : '❌'} ${hasSubscription ? 'Autorisé (abonnement)' : 'Refusé'}`);
+  return hasSubscription;
 }
 
 /** ---------- Screen ---------- */
@@ -106,9 +128,10 @@ export default function EntrainementScreen({ navigation }: Props) {
   const [loading, setLoading] = useState(false);
   const [starting, setStarting] = useState(false);
   const [volume, setVolume] = useState<10 | 50 | 100>(10);
+  const [showSubscriptionModal, setShowSubscriptionModal] = useState(false);
 
   useEffect(() => {
-    console.log("[ROUTE] EntrainementScreen mounted as:", route.name); // doit afficher "Entrainement"
+    console.log("[ROUTE] EntrainementScreen mounted as:", route.name);
   }, [route.name]);
 
   useEffect(() => {
@@ -119,7 +142,6 @@ export default function EntrainementScreen({ navigation }: Props) {
         const { data: sessionData } = await supabase.auth.getSession();
         const token = sessionData?.session?.access_token;
 
-        // NOTE: parcours_id=1 — garder la logique actuelle tant que nécessaire
         const url = `${API_BASE}/parcours/positions_currentes?parcours_id=1`;
 
         const res = await fetchWithSupabaseAuth(url, {
@@ -147,17 +169,25 @@ export default function EntrainementScreen({ navigation }: Props) {
     };
   }, []);
 
-  /** Au tap sur “CALCULEZ !” */
+  /** Au tap sur "CALCULEZ !" */
   const onStartPress = async () => {
     if (starting) return;
     setStarting(true);
+    
     try {
+      console.log('[Start] 🎯 Vérification accès...');
       const allowed = await canStartTraining();
+      
       if (!allowed) {
-        return navigation.navigate("Info");
+        console.log('[Start] 🔒 Accès refusé → Affichage modal');
+        setShowSubscriptionModal(true);
+        setStarting(false);
+        return;
       }
 
-      // Si on est déjà sur "Train", empile une nouvelle session ; sinon navigate
+      console.log('[Start] ✅ Accès autorisé → Lancement entraînement');
+      
+      // Navigation vers Train
       const state = navigation.getState();
       const current = state.routes[state.index]?.name;
       if (current === "Train") {
@@ -166,21 +196,130 @@ export default function EntrainementScreen({ navigation }: Props) {
         navigation.navigate("Train", { volume });
       }
     } catch (e: any) {
+      console.error('[Start] ❌ Erreur:', e);
       Alert.alert("Oups", e?.message ?? "Action impossible pour le moment.");
     } finally {
       setStarting(false);
     }
   };
 
+  /** Fonction pour ouvrir le paywall RevenueCat */
+  const openPaywallDirect = async () => {
+    try {
+      console.log('[Paywall] 💳 Ouverture du paywall...');
+      
+      // Vérifier si on est dans Expo Go
+      if (Constants.appOwnership === 'expo') {
+        Alert.alert(
+          "Expo Go détecté",
+          "Les achats in-app ne fonctionnent pas dans Expo Go. Testez avec TestFlight ou un build de développement."
+        );
+        return;
+      }
+
+      // Récupérer la clé RevenueCat
+      const extra: any = Constants?.expoConfig?.extra ?? {};
+      const rcKey = extra?.EXPO_PUBLIC_RC_IOS_SDK_KEY || extra?.RC_API_KEY;
+      
+      if (!rcKey || !String(rcKey).startsWith('appl_')) {
+        throw new Error('Clé RevenueCat iOS manquante ou invalide');
+      }
+
+      // Configurer RevenueCat
+      await Purchases.configure({ apiKey: rcKey });
+      
+      // Récupérer les offerings
+      const offerings: any = await Purchases.getOfferings();
+      const current = offerings?.current;
+      
+      if (!current || !current.availablePackages?.length) {
+        throw new Error('Aucune offre disponible. Vérifiez RevenueCat.');
+      }
+
+      // Trouver les packages mensuel et annuel
+      const monthly = current.availablePackages.find((p: any) =>
+        p?.identifier?.toLowerCase?.().includes('month')
+      );
+      const annual = current.availablePackages.find((p: any) =>
+        p?.identifier?.toLowerCase?.().includes('annual') ||
+        p?.identifier?.toLowerCase?.().includes('year')
+      );
+
+      if (!monthly && !annual) {
+        throw new Error('Packages mensuel/annuel introuvables');
+      }
+
+      // Préparer les labels
+      const monthlyLabel = monthly
+        ? `${monthly.product?.priceString ?? '—'} · Mensuel`
+        : null;
+      
+      const annualPrice = annual?.product?.price as number | undefined;
+      const annualPerMonth = annualPrice ? (annualPrice / 12).toFixed(2) : null;
+      const annualLabel = annual
+        ? `${annual.product?.priceString ?? '—'} · Annuel${
+            annualPerMonth ? ` (~${annualPerMonth}€/mois)` : ''
+          }`
+        : null;
+
+      // Afficher l'Alert avec les options
+      Alert.alert(
+        'Choisir un abonnement',
+        'Soutenez Pixel et continuez votre progression',
+        [
+          annual && {
+            text: annualLabel!,
+            onPress: async () => {
+              try {
+                console.log('[Paywall] Achat annuel...');
+                await Purchases.purchasePackage(annual);
+                Alert.alert('✅ Succès', 'Abonnement annuel activé !');
+                setShowSubscriptionModal(false);
+              } catch (e: any) {
+                if (!e?.userCancelled) {
+                  console.error('[Paywall] Erreur achat annuel:', e);
+                  Alert.alert('Erreur', e?.message ?? 'Achat impossible.');
+                }
+              }
+            },
+          },
+          monthly && {
+            text: monthlyLabel!,
+            onPress: async () => {
+              try {
+                console.log('[Paywall] Achat mensuel...');
+                await Purchases.purchasePackage(monthly);
+                Alert.alert('✅ Succès', 'Abonnement mensuel activé !');
+                setShowSubscriptionModal(false);
+              } catch (e: any) {
+                if (!e?.userCancelled) {
+                  console.error('[Paywall] Erreur achat mensuel:', e);
+                  Alert.alert('Erreur', e?.message ?? 'Achat impossible.');
+                }
+              }
+            },
+          },
+          { 
+            text: 'Annuler', 
+            style: 'cancel',
+            onPress: () => console.log('[Paywall] Annulé')
+          },
+        ].filter(Boolean) as any
+      );
+    } catch (e: any) {
+      console.error('[Paywall] Erreur globale:', e);
+      Alert.alert('Erreur', e?.message ?? 'Paywall indisponible.');
+    }
+  };
+
   return (
     <SafeAreaView style={styles.safe}>
       <View style={styles.container}>
-        <Text style={styles.title}>Préparer l’entraînement</Text>
 
         <PositionsTable positions={positions} loading={loading} />
 
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>Nombre d’opérations</Text>
+          <Text style={styles.cardTitle}>Nombre d'opérations</Text>
           <View style={styles.volRow}>
             <VolPill value={100} active={volume === 100} onPress={() => setVolume(100)} />
             <VolPill value={50} active={volume === 50} onPress={() => setVolume(50)} />
@@ -196,6 +335,16 @@ export default function EntrainementScreen({ navigation }: Props) {
         >
           <Text style={styles.ctaText}>{starting ? "..." : "CALCULEZ !"}</Text>
         </TouchableOpacity>
+
+        {/* Modal d'abonnement */}
+        <SubscriptionModal
+          visible={showSubscriptionModal}
+          onClose={() => {
+            console.log('[Modal] ❌ Fermé');
+            setShowSubscriptionModal(false);
+          }}
+          onSubscribe={openPaywallDirect}
+        />
       </View>
     </SafeAreaView>
   );
