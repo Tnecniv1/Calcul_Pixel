@@ -83,7 +83,7 @@ const BigPixel = forwardRef<BigPixelHandle, Props>(function BigPixel(
   const animateSteps = async (delta: number) => {
     if (delta === 0) return;
     const dir = Math.sign(delta); // +1 fill, -1 unfill
-    const steps = Math.min(Math.abs(delta), maxDelta);
+    const steps = Math.abs(delta);
     for (let i = 0; i < steps; i++) {
       const next = currentLitRef.current + dir;
       if (next < 0 || next > capacity) break;
@@ -100,8 +100,7 @@ const BigPixel = forwardRef<BigPixelHandle, Props>(function BigPixel(
   };
 
   const applyScore = async (score: number) => {
-    const capped = Math.max(-maxDelta, Math.min(maxDelta, Math.trunc(score)));
-    await animateSteps(capped);
+    await animateSteps(Math.trunc(score));
   };
 
   useImperativeHandle(ref, () => ({ applyScore, animateTo }), [applyScore, animateTo]);

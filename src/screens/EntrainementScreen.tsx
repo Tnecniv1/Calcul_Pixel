@@ -351,6 +351,62 @@ export default function EntrainementScreen({ navigation }: Props) {
 }
 
 /** ---------- Sous-composants ---------- */
+function getTauxColor(taux: number): string {
+  if (taux >= 95) return "#00B894";
+  if (taux >= 70) return "#FFD93D";
+  if (taux >= 50) return "#FFA94D";
+  return "#FF6B6B";
+}
+
+function TrendIcon({ evolution }: { evolution?: string }) {
+  const ev = (evolution ?? "").toLowerCase();
+  if (ev === "progression") {
+    return <AntDesign name="arrowup" size={16} color="#00B894" style={{ marginLeft: 6 }} />;
+  }
+  if (ev === "régression" || ev === "regression") {
+    return <AntDesign name="arrowdown" size={16} color="#FF6B6B" style={{ marginLeft: 6 }} />;
+  }
+  if (ev === "stagnation") {
+    return <AntDesign name="minus" size={16} color="#9CA3AF" style={{ marginLeft: 6 }} />;
+  }
+  return null;
+}
+
+function OperationCard({ operation, pos }: { operation: string; pos?: Position | null }) {
+  if (!pos) return null;
+
+  const taux = typeof pos.taux === "number" ? Math.round(pos.taux * 100) : 0;
+  const restantes = pos.restantes ?? 0;
+
+  return (
+    <View style={styles.operationCard}>
+      <View style={styles.cardHeader}>
+        <View style={styles.operationNameRow}>
+          <Text style={styles.operationName}>{operation}</Text>
+          <TrendIcon evolution={pos.type_evolution} />
+        </View>
+        <Text style={styles.niveau}>Niv {pos.niveau ?? "--"}</Text>
+      </View>
+
+      <View style={styles.cardStats}>
+        <View style={styles.statRow}>
+          <Text style={styles.statLabel}>📊 Taux de réussite</Text>
+          <Text style={[styles.statValue, { color: getTauxColor(taux) }]}>
+            {taux}%
+          </Text>
+        </View>
+
+        <View style={styles.statRow}>
+          <Text style={styles.statLabel}>⏳ Prochaine évolution</Text>
+          <Text style={styles.statValue}>
+            {restantes > 0 ? `dans ${restantes} ops` : "prêt !"}
+          </Text>
+        </View>
+      </View>
+    </View>
+  );
+}
+
 function PositionsTable({
   positions,
   loading,
@@ -358,85 +414,19 @@ function PositionsTable({
   positions: Positions | null;
   loading: boolean;
 }) {
-  const scorePoints =
-    typeof positions?.score_points === "number" ? positions!.score_points! : null;
-
-  const evolutions = [
-    positions?.Addition?.type_evolution,
-    positions?.Soustraction?.type_evolution,
-    positions?.Multiplication?.type_evolution,
-  ]
-    .filter(Boolean)
-    .map((x) => String(x).toLowerCase());
-
-  const hasUp = evolutions.includes("progression");
-  const hasDown = evolutions.includes("régression") || evolutions.includes("regression");
-  const trend: "up" | "down" | "flat" = hasUp ? "up" : hasDown ? "down" : "flat";
+  if (loading) {
+    return (
+      <View style={styles.operationsContainer}>
+        <ActivityIndicator />
+      </View>
+    );
+  }
 
   return (
-    <View style={styles.tableCard}>
-      <View style={styles.tableHeaderRow}>
-        <Text style={[styles.th, styles.thLeft]}>OPÉRATIONS</Text>
-        <Text style={styles.th}>NIVEAU</Text>
-        <Text style={[styles.th, styles.thRight]}>SCORE</Text>
-      </View>
-
-      {loading ? (
-        <View style={{ padding: 16 }}>
-          <ActivityIndicator />
-        </View>
-      ) : (
-        <View style={styles.tableBodyRow}>
-          <View style={styles.leftBlock}>
-            <TableLine op="Addition" pos={positions?.Addition} />
-            <View style={styles.rowDivider} />
-            <TableLine op="Soustraction" pos={positions?.Soustraction} />
-            <View style={styles.rowDivider} />
-            <TableLine op="Multiplication" pos={positions?.Multiplication} />
-          </View>
-
-          <View style={styles.rightBlock}>
-            <View style={[styles.scorePanel, { paddingHorizontal: 14, minWidth: 110 }]}>
-              <Text style={[styles.scoreBig, { marginRight: 0 }]}>
-                {scorePoints !== null ? scorePoints.toLocaleString("fr-FR") : "--"}
-              </Text>
-            </View>
-            <View
-              style={[
-                styles.trendBadge,
-                trend === "up"
-                  ? { backgroundColor: "#2ecc71" }
-                  : trend === "down"
-                  ? { backgroundColor: "#e74c3c" }
-                  : { backgroundColor: "#9CA3AF" },
-              ]}
-            >
-              {trend === "up" && <AntDesign name="arrowup" size={18} color="#fff" />}
-              {trend === "down" && <AntDesign name="arrowdown" size={18} color="#fff" />}
-              {trend === "flat" && <AntDesign name="minus" size={18} color="#fff" />}
-            </View>
-          </View>
-        </View>
-      )}
-    </View>
-  );
-}
-
-function TableLine({ op, pos }: { op: string; pos?: Position | null }) {
-  return (
-    <View style={styles.bodyRow}>
-      <View style={styles.cellLeft}>
-        <Text style={styles.opLabel} numberOfLines={1}>
-          {op}
-        </Text>
-      </View>
-
-      <View style={styles.cellMid}>
-        <Text style={styles.levelCell}>Niv {pos?.niveau ?? "--"}</Text>
-        {typeof pos?.restantes === "number" && (
-          <Text style={styles.subLevelCell}>N-{pos!.restantes}</Text>
-        )}
-      </View>
+    <View style={styles.operationsContainer}>
+      <OperationCard operation="Addition" pos={positions?.Addition} />
+      <OperationCard operation="Soustraction" pos={positions?.Soustraction} />
+      <OperationCard operation="Multiplication" pos={positions?.Multiplication} />
     </View>
   );
 }
@@ -494,77 +484,67 @@ const styles = StyleSheet.create({
   },
   cardTitle: { color: COLORS.blueDark, fontWeight: "800", marginBottom: 10, fontSize: 16 },
 
-  tableCard: {
+  // --- Cartes opérations ---
+  operationsContainer: {
+    gap: 12,
+  },
+  operationCard: {
     backgroundColor: COLORS.card,
-    borderRadius: 14,
-    borderWidth: 2,
-    borderColor: COLORS.blueDark,
-    overflow: "hidden",
+    borderRadius: 16,
+    padding: 20,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 3,
   },
-  tableHeaderRow: {
+  cardHeader: {
     flexDirection: "row",
-    backgroundColor: COLORS.blue,
-    borderBottomWidth: 2,
-    borderColor: COLORS.blueDark,
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 16,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(0, 0, 0, 0.1)",
   },
-  th: {
-    flex: 1,
-    textAlign: "center",
-    color: COLORS.blueDark,
-    fontWeight: "900",
-    fontSize: 12,
-    paddingVertical: 10,
-  },
-  thLeft: { flex: 1.4, textAlign: "left", paddingLeft: 14 },
-  thRight: { textAlign: "center" },
-
-  tableBodyRow: { flexDirection: "row" },
-  leftBlock: { flex: 1.8, borderRightWidth: 2, borderColor: COLORS.blueDark },
-  rightBlock: { flex: 1, alignItems: "center", justifyContent: "space-evenly", paddingVertical: 12 },
-
-  bodyRow: {
+  operationNameRow: {
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: 10,
-    paddingHorizontal: 12,
   },
-  rowDivider: { height: 1.5, backgroundColor: "#D1D5DB" },
-
-  cellLeft: { flex: 1.2, justifyContent: "center" },
-  cellMid: {
-    width: 110,
-    alignItems: "center",
-    justifyContent: "center",
-    borderLeftWidth: 1.5,
-    borderColor: "#D1D5DB",
+  operationName: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#1A1F3A",
   },
-
-  opLabel: { color: COLORS.blueDark, fontWeight: "700" },
-  levelCell: { color: COLORS.blueDark, fontWeight: "900", fontSize: 16 },
-  levelSub: { fontSize: 11, color: COLORS.subtext, marginTop: 2, fontWeight: "600" },
-
-  scorePanel: {
-    minWidth: 88,
-    paddingHorizontal: 10,
-    height: 44,
-    borderRadius: 999,
-    borderWidth: 2,
-    borderColor: COLORS.blueDark,
-    backgroundColor: "#F7F7F7",
+  niveau: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#6C5CE7",
+  },
+  cardStats: {
+    gap: 12,
+  },
+  statRow: {
     flexDirection: "row",
+    justifyContent: "space-between",
     alignItems: "center",
-    justifyContent: "center",
   },
-  scoreBig: { fontSize: 22, fontWeight: "900", color: COLORS.blueDark },
+  statLabel: {
+    fontSize: 14,
+    color: "rgba(0, 0, 0, 0.6)",
+  },
+  statValue: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#1A1F3A",
+  },
 
-  subLevelCell: { fontSize: 11, fontWeight: "600", color: COLORS.subtext, marginTop: 2 },
-
-  trendBadge: { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center" },
-
+  // --- Volume pills ---
   volRow: { flexDirection: "row", justifyContent: "space-between", gap: 10, marginTop: 8 },
   volPill: { flex: 1, height: 40, borderRadius: 999, alignItems: "center", justifyContent: "center", borderWidth: 2 },
   volText: { fontWeight: "800", fontSize: 16 },
 
+  // --- CTA ---
   cta: {
     height: 50,
     borderRadius: 999,

@@ -1,6 +1,6 @@
 // src/services/profileService.ts
 import { supabase } from "../supabase";
-import * as ImageManipulator from "expo-image-manipulator";
+import { ImageManipulator, SaveFormat } from "expo-image-manipulator";
 import * as FileSystem from "expo-file-system";
 import { decode } from "base64-arraybuffer";
 
@@ -136,20 +136,20 @@ export async function updateDisplayName(displayName: string | null): Promise<boo
 
 /**
  * Redimensionne une image avant upload
+ * Utilise la nouvelle API chainable d'expo-image-manipulator v13+
+ * Propage l'erreur au lieu de la masquer pour eviter de traiter une image trop volumineuse
  */
 async function resizeImage(uri: string): Promise<string> {
-  try {
-    const result = await ImageManipulator.manipulateAsync(
-      uri,
-      [{ resize: { width: MAX_IMAGE_SIZE, height: MAX_IMAGE_SIZE } }],
-      { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG }
-    );
-    return result.uri;
-  } catch (err) {
-    console.error("[profileService] resizeImage failed:", err);
-    // Retourner l'URI original si le redimensionnement echoue
-    return uri;
-  }
+  const imageRef = await ImageManipulator.manipulate(uri)
+    .resize({ width: MAX_IMAGE_SIZE, height: MAX_IMAGE_SIZE })
+    .renderAsync();
+
+  const result = await imageRef.saveAsync({
+    compress: 0.8,
+    format: SaveFormat.JPEG,
+  });
+
+  return result.uri;
 }
 
 /**

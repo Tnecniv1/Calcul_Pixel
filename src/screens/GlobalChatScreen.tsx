@@ -1,5 +1,5 @@
 // src/screens/GlobalChatScreen.tsx
-import React, { useCallback, useRef } from "react";
+import React, { useCallback, useEffect, useRef } from "react";
 import {
   SafeAreaView,
   View,
@@ -16,6 +16,7 @@ import { useGlobalChat } from "../hooks/useGlobalChat";
 import MessageBubble from "../components/MessageBubble";
 import ChatInput from "../components/ChatInput";
 import type { Message } from "../services/chatService";
+import { markMessagesAsRead } from "../hooks/useUnreadMessages";
 
 export default function GlobalChatScreen() {
   const {
@@ -34,6 +35,11 @@ export default function GlobalChatScreen() {
   } = useGlobalChat();
 
   const flatListRef = useRef<FlatList<Message>>(null);
+
+  // Marquer tous les messages comme lus à l'ouverture
+  useEffect(() => {
+    markMessagesAsRead();
+  }, []);
 
   // Scroll vers le bas quand un nouveau message arrive
   const scrollToBottom = useCallback(() => {

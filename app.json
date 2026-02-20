@@ -3,7 +3,7 @@
     "name": "pixel",
     "slug": "pixel-mobile",
     "scheme": "pixelcalc",
-    "version": "1.0.8",
+    "version": "1.0.11",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -28,8 +28,11 @@
           {
             "CFBundleURLSchemes": ["pixelcalc"]
           }
-        ]
+        ],
+        "NSPhotoLibraryUsageDescription": "Pixel a besoin d'accéder à vos photos pour définir votre photo de profil.",
+        "NSCameraUsageDescription": "Pixel a besoin d'accéder à votre caméra pour prendre une photo de profil."
       }
+
     },
 
     "android": {

@@ -147,19 +147,24 @@ export default function TrainScreen(props: any) {
       (async () => {
         try {
           setState("posting");
+          console.time('POST observations');
           await postObservationsBatch(obsBuf.current);
-        } catch (e: any) {
-          setErr(`Erreur envoi résultats: ${e?.message ?? e}`);
-        } finally {
+          console.timeEnd('POST observations');
+
+          // Navigation SEULEMENT si POST réussi
           setState("ready");
           navigation?.replace("Result", {
             type: "Addition",
             entrainementId: entrainementIdRef.current!,
             parcoursId: exos[0]?.Parcours_Id || 0,
-            score,
+            score: score + (correct ? 1 : 0),
             total: exos.length,
             mistakes: mistakesRef.current,
           });
+        } catch (e: any) {
+          setErr(`Erreur envoi résultats: ${e?.message ?? e}`);
+          setState("ready");
+          // Pas de navigation si erreur
         }
       })();
     }
@@ -221,6 +226,17 @@ export default function TrainScreen(props: any) {
       </View>
 
       {err && <Text style={styles.errorText}>{err}</Text>}
+
+      {/* Overlay de chargement */}
+      {state === "posting" && (
+        <View style={styles.loadingOverlay}>
+          <View style={styles.loadingCard}>
+            <Text style={styles.loadingEmoji}>⏳</Text>
+            <Text style={styles.postingText}>Deux petites secondes...</Text>
+            <Text style={styles.postingSubtext}>Je calcule vos résultats</Text>
+          </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -288,5 +304,42 @@ const styles = StyleSheet.create({
     alignSelf: "center",
     borderRadius: 12,
     overflow: "hidden",
+  },
+
+  loadingOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.85)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 999,
+  },
+  loadingCard: {
+    backgroundColor: '#1A1F3A',
+    borderRadius: 20,
+    padding: 32,
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+    minWidth: 280,
+  },
+  loadingEmoji: {
+    fontSize: 64,
+    marginBottom: 16,
+  },
+  postingText: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#FFF',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  postingSubtext: {
+    fontSize: 14,
+    color: 'rgba(255, 255, 255, 0.7)',
+    textAlign: 'center',
   },
 });

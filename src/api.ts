@@ -246,7 +246,9 @@ export async function getPixelState(): Promise<PixelState> {
 
     const res = await fetch(`${API_URL}/pixel/state?auth_uid=${auth_uid}`);
     if (!res.ok) throw new Error(`Pixel state error ${res.status}`);
-    return (await res.json()) as PixelState;
+    const json = await res.json();
+    console.log('📡 [API] getPixelState response:', JSON.stringify(json, null, 2));
+    return json as PixelState;
   } catch (err) {
     console.error("getPixelState error:", err);
     // Valeurs sûres par défaut pour ne pas casser le rendu

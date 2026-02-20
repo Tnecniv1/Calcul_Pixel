@@ -16,6 +16,8 @@ import type { RootStackParamList } from "../../App";
 import { theme } from "../theme";
 import { supabase } from "../supabase";
 import { checkAndUnlockBadges, CheckBadgesResult, BadgeDefinition } from "../services/badgeService";
+import CorrectionChoiceModal from "../components/CorrectionChoiceModal";
+import ScoreBreakdownModal from "../components/ScoreBreakdownModal";
 
 /* =========================================================================
    Types
@@ -42,6 +44,9 @@ type ObsRow = {
   Temps_Seconds: number | string | null;
   Marge_Erreur: number | string | null;
   Score: number | string | null;
+  bonus_vitesse: number | null;
+  bonus_marge: number | null;
+  score_global: number | null;
   Entrainement_Id?: number | string | null;
 };
 
@@ -151,14 +156,21 @@ const StatRow = ({
   valueText,
   progress = 0.5,
   emphasize = false,
+  fillColor,
+  chipStyle: chipStyleOverride,
+  chipTextColor,
 }: {
   icon: string;
   label: string;
   valueText: string;
   progress?: number; // 0..1
   emphasize?: boolean;
+  fillColor?: string;
+  chipStyle?: object;
+  chipTextColor?: string;
 }) => {
   const pct = Math.max(0, Math.min(1, progress));
+  const resolvedFillColor = fillColor ?? COLORS.purpleSoft;
   return (
     <View style={styles.statRow}>
       <View style={styles.statLeft}>
@@ -170,10 +182,10 @@ const StatRow = ({
 
       <View style={styles.statRight}>
         <View style={styles.statTrack}>
-          <View style={[styles.statFill, { width: `${pct * 100}%` }]} />
+          <View style={[styles.statFill, { width: `${pct * 100}%`, backgroundColor: resolvedFillColor }]} />
         </View>
-        <View style={[styles.statChip, emphasize && styles.statChipEmph]}>
-          <Text style={[styles.statChipText, emphasize && styles.statChipTextEmph]}>
+        <View style={[styles.statChip, emphasize && styles.statChipEmph, chipStyleOverride]}>
+          <Text style={[styles.statChipText, emphasize && styles.statChipTextEmph, chipTextColor ? { color: chipTextColor } : undefined]}>
             {valueText}
           </Text>
         </View>
@@ -261,32 +273,54 @@ const AnimatedBadgeItem = ({ badge, index }: { badge: BadgeDefinition; index: nu
   );
 };
 
-const OperationCard = ({ title, data }: { title: OperationKey; data: OperationMetrics }) => (
-  <View style={styles.card}>
-    <SectionHeader title={title} />
-    <View style={styles.statsGrid}>
-      <StatRow
-        icon="🎯"
-        label="Taux de réussite"
-        valueText={`${Math.round(data.successRate)} %`}
-        progress={data.successRate / 100}
-        emphasize
-      />
-      <StatRow
-        icon="⏱️"
-        label="Temps moyen"
-        valueText={`${Number(data.avgTimeSec || 0).toFixed(2)} s`}
-        progress={data.barTime ?? 0.5}
-      />
-      <StatRow
-        icon="⚡"
-        label="Marge d'erreur"
-        valueText={`${Math.round(data.errorMargin || 0)} %`}
-        progress={Math.min(1, (data.errorMargin || 0) / 100)}
-      />
+const OperationCard = ({ title, data }: { title: OperationKey; data: OperationMetrics }) => {
+  const successFillColor =
+    data.successRate >= 75 ? "rgba(74,222,128,0.4)"
+    : data.successRate >= 50 ? "rgba(245,158,11,0.4)"
+    : "rgba(248,113,113,0.4)";
+
+  const successChipStyle =
+    data.successRate >= 75
+      ? { backgroundColor: "rgba(74,222,128,0.2)", borderColor: "rgba(74,222,128,0.4)" }
+      : data.successRate >= 50
+      ? { backgroundColor: "rgba(245,158,11,0.2)", borderColor: "rgba(245,158,11,0.4)" }
+      : { backgroundColor: "rgba(248,113,113,0.2)", borderColor: "rgba(248,113,113,0.4)" };
+
+  const successChipTextColor =
+    data.successRate >= 75 ? COLORS.green
+    : data.successRate >= 50 ? COLORS.orange
+    : COLORS.red;
+
+  return (
+    <View style={styles.card}>
+      <SectionHeader title={title} />
+      <View style={styles.statsGrid}>
+        <StatRow
+          icon="🎯"
+          label="Taux de réussite"
+          valueText={`${Math.round(data.successRate)} %`}
+          progress={data.successRate / 100}
+          emphasize
+          fillColor={successFillColor}
+          chipStyle={successChipStyle}
+          chipTextColor={successChipTextColor}
+        />
+        <StatRow
+          icon="⏱️"
+          label="Temps moyen"
+          valueText={`${Number(data.avgTimeSec || 0).toFixed(2)} s`}
+          progress={data.barTime ?? 0.5}
+        />
+        <StatRow
+          icon="⚡"
+          label="Marge d'erreur"
+          valueText={`${Math.round(data.errorMargin || 0)} %`}
+          progress={Math.min(1, (data.errorMargin || 0) / 100)}
+        />
+      </View>
     </View>
-  </View>
-);
+  );
+};
 
 /* =========================================================================
    Screen
@@ -299,6 +333,15 @@ export default function ResultScreen({ route, navigation }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [sessionScore, setSessionScore] = useState<number | null>(null);
   const [newBadges, setNewBadges] = useState<BadgeDefinition[]>([]);
+  const [showChoiceModal, setShowChoiceModal] = useState(false);
+  const [mistakeCount, setMistakeCount] = useState(0);
+  const [showScoreModal, setShowScoreModal] = useState(false);
+  const [scoreBreakdown, setScoreBreakdown] = useState({
+    base: 0,
+    vitesse: 0,
+    precision: 0,
+    total: 0,
+  });
 
   const ui = useMemo(() => (metrics ? normalizeBarTimes(metrics) : makeEmptyMetrics()), [metrics]);
 
@@ -322,21 +365,29 @@ export default function ResultScreen({ route, navigation }: Props) {
     checkBadges();
   }, [metrics, loading]);
 
+  // Auto-open choice modal AFTER score modal is closed
+  useEffect(() => {
+    if (showScoreModal || loading || mistakeCount === 0) return;
+    const timer = setTimeout(() => setShowChoiceModal(true), 500);
+    return () => clearTimeout(timer);
+  }, [showScoreModal, loading, mistakeCount]);
+
   useEffect(() => {
     let alive = true;
     (async () => {
       setLoading(true);
       setError(null);
 
+      console.time('SELECT observations');
       const { data, error } = await supabase
         .from("Observations")
         .select(`
-          Operation,
-          Etat, Proposition, Solution,
-          Temps_Seconds, Marge_Erreur,
-          Score
+          Operation, Etat, Proposition, Solution,
+          Temps_Seconds, Marge_Erreur, Score,
+          bonus_vitesse, bonus_marge, score_global
         `)
         .eq("Entrainement_Id", entrainementId);
+      console.timeEnd('SELECT observations');
 
       if (!alive) return;
 
@@ -349,9 +400,53 @@ export default function ResultScreen({ route, navigation }: Props) {
         return;
       }
 
-      const rows = Array.isArray(data) ? (data as ObsRow[]) : [];
+      let rows = Array.isArray(data) ? (data as ObsRow[]) : [];
+      console.log('[ResultScreen] Lignes reçues:', rows.length);
+
+      // Si 0 lignes, c'est probablement une race condition → retry
+      if (rows.length === 0 && entrainementId) {
+        console.log('[ResultScreen] 0 lignes détectées, retry dans 1.5s...');
+        await new Promise(r => setTimeout(r, 1500));
+
+        if (!alive) return;
+
+        const retry = await supabase
+          .from("Observations")
+          .select(`
+            Operation, Etat, Proposition, Solution,
+            Temps_Seconds, Marge_Erreur, Score,
+            bonus_vitesse, bonus_marge, score_global
+          `)
+          .eq("Entrainement_Id", entrainementId);
+
+        rows = Array.isArray(retry.data) ? (retry.data as ObsRow[]) : [];
+        console.log('[ResultScreen] Après retry:', rows.length, 'lignes');
+      }
+
       setMetrics(computeMetrics(rows));
-      setSessionScore(sumSessionScore(rows));
+      // Utiliser null si vraiment 0 lignes (pour activer le fallback)
+      setSessionScore(rows.length > 0 ? sumSessionScore(rows) : null);
+
+      // Count mistakes for the choice modal
+      const faultyCount = rows.filter((r) => !isCorrect(r)).length;
+      setMistakeCount(faultyCount);
+
+      // Score breakdown (nouveau scoring)
+      if (rows.length > 0) {
+        const sumBase = rows.reduce((acc, o) => acc + (toNum(o.Score) ?? 0), 0);
+        const sumVitesse = rows.reduce((acc, o) => acc + (o.bonus_vitesse ?? 0), 0);
+        const sumPrecision = rows.reduce((acc, o) => acc + (o.bonus_marge ?? 0), 0);
+
+        setScoreBreakdown({
+          base: sumBase,
+          vitesse: Math.round(sumVitesse),
+          precision: Math.round(sumPrecision),
+          total: Math.round(sumBase + sumVitesse + sumPrecision),
+        });
+
+        setTimeout(() => setShowScoreModal(true), 500);
+      }
+
       setLoading(false);
     })();
 
@@ -365,7 +460,10 @@ export default function ResultScreen({ route, navigation }: Props) {
   return (
     <SafeAreaView style={styles.safe}>
       <View style={styles.container}>
-        {/* HEADER : Score seul, centré */}
+        {/* HEADER : Titre session + Score */}
+        <Text style={styles.sessionTitle}>
+          Session terminée · {total} exercices
+        </Text>
         <View style={styles.scoreOnlyCard}>
           <Text
             style={[
@@ -381,6 +479,7 @@ export default function ResultScreen({ route, navigation }: Props) {
                 : `${effectiveScore}`
               : "…"}
           </Text>
+          <Text style={styles.scoreLabel}>pixels gagnés</Text>
         </View>
 
         {/* NOUVEAUX BADGES DÉBLOQUÉS */}
@@ -430,16 +529,27 @@ export default function ResultScreen({ route, navigation }: Props) {
           >
             <Text style={styles.btnGhostText}>Accueil</Text>
           </TouchableOpacity>
-
-          <TouchableOpacity
-            onPress={() => navigation.navigate("Review", { entrainementId, mistakes })}
-            activeOpacity={0.9}
-            style={styles.btnPrimary}
-          >
-            <Text style={styles.btnPrimaryText}>CORRECTION</Text>
-          </TouchableOpacity>
         </View>
       </View>
+
+      <ScoreBreakdownModal
+        visible={showScoreModal}
+        onClose={() => setShowScoreModal(false)}
+        scoreBase={scoreBreakdown.base}
+        bonusVitesse={scoreBreakdown.vitesse}
+        bonusPrecision={scoreBreakdown.precision}
+        scoreTotal={scoreBreakdown.total}
+      />
+
+      <CorrectionChoiceModal
+        visible={showChoiceModal}
+        errorCount={mistakeCount}
+        onSkip={() => setShowChoiceModal(false)}
+        onCorrect={() => {
+          setShowChoiceModal(false);
+          navigation.navigate("Review", { entrainementId, mistakes });
+        }}
+      />
     </SafeAreaView>
   );
 }
@@ -473,20 +583,31 @@ const styles = StyleSheet.create({
     paddingBottom: 10,
   },
 
+  /* ----- Titre session ----- */
+  sessionTitle: {
+    color: "rgba(255,255,255,0.4)",
+    fontSize: 13,
+    fontWeight: "600",
+    textAlign: "center",
+    marginBottom: 6,
+    letterSpacing: 0.3,
+  },
+
   /* ----- Score seul, centré ----- */
   scoreOnlyCard: {
     backgroundColor: COLORS.layer,
     borderRadius: 14,
     borderWidth: 1,
     borderColor: COLORS.layerBorder,
-    height: 64,
+    height: 80,
     alignItems: "center",
     justifyContent: "center",
     marginBottom: 6,
   },
-  bigScore: { fontSize: 28, fontWeight: "900", letterSpacing: 0.2 },
+  bigScore: { fontSize: 42, fontWeight: "900", letterSpacing: 0.2 },
   bigScorePos: { color: COLORS.green },
   bigScoreNeg: { color: COLORS.red },
+  scoreLabel: { fontSize: 12, color: "rgba(255,255,255,0.45)", marginTop: 2 },
 
   /* ----- Nouveaux badges ----- */
   newBadgesCard: {

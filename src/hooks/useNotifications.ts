@@ -71,10 +71,21 @@ async function saveTokenToDatabase(authUid: string, token: string) {
 
     const userId = mapData.user_id;
 
-    // 2. Mettre à jour la table Users avec le user_id (bigint)
+    // 2. Nettoyer ce token des autres utilisateurs (evite les doublons et auto-notifications)
+    const { error: cleanError } = await supabase
+      .from('Users')
+      .update({ notification_token: null })
+      .eq('notification_token', token)
+      .neq('id', userId);
+
+    if (cleanError) {
+      console.warn('[Notifications] Erreur nettoyage anciens tokens:', cleanError);
+    }
+
+    // 3. Mettre a jour la table Users avec le user_id (bigint)
     const { error } = await supabase
       .from('Users')
-      .update({ 
+      .update({
         notification_token: token,
         notification_enabled: true
       })
@@ -83,7 +94,7 @@ async function saveTokenToDatabase(authUid: string, token: string) {
     if (error) {
       console.error('[Notifications] Erreur sauvegarde token:', error);
     } else {
-      console.log('[Notifications] Token sauvegardé pour user_id:', userId);
+      console.log('[Notifications] Token sauvegarde pour user_id:', userId);
     }
   } catch (error) {
     console.error('[Notifications] Erreur:', error);
