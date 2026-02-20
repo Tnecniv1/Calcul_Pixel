@@ -18,7 +18,7 @@
 
     "ios": {
       "bundleIdentifier": "com.vcent1.pixelmobile",
-      "buildNumber": "42",
+      "buildNumber": "43",
       "supportsTablet": true,
       "usesAppleSignIn": true,
       "infoPlist": {
