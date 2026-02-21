@@ -147,9 +147,7 @@ export default function TrainScreen(props: any) {
       (async () => {
         try {
           setState("posting");
-          console.time('POST observations');
           await postObservationsBatch(obsBuf.current);
-          console.timeEnd('POST observations');
 
           // Navigation SEULEMENT si POST réussi
           setState("ready");
