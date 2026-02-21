@@ -378,39 +378,9 @@ export default function ResultScreen({ route, navigation }: Props) {
       setLoading(true);
       setError(null);
 
-      console.time('SELECT observations');
-      const { data, error } = await supabase
-        .from("Observations")
-        .select(`
-          Operation, Etat, Proposition, Solution,
-          Temps_Seconds, Marge_Erreur, Score,
-          bonus_vitesse, bonus_marge, score_global
-        `)
-        .eq("Entrainement_Id", entrainementId);
-      console.timeEnd('SELECT observations');
-
-      if (!alive) return;
-
-      if (error) {
-        console.log("[ResultScreen] Supabase error", error.message);
-        setLoading(false);
-        setError("Aucune donnée pour cet entraînement.");
-        setMetrics(null);
-        setSessionScore(null);
-        return;
-      }
-
-      let rows = Array.isArray(data) ? (data as ObsRow[]) : [];
-      console.log('[ResultScreen] Lignes reçues:', rows.length);
-
-      // Si 0 lignes, c'est probablement une race condition → retry
-      if (rows.length === 0 && entrainementId) {
-        console.log('[ResultScreen] 0 lignes détectées, retry dans 1.5s...');
-        await new Promise(r => setTimeout(r, 1500));
-
-        if (!alive) return;
-
-        const retry = await supabase
+      try {
+        console.log('[ResultScreen] SELECT observations pour entrainementId:', entrainementId);
+        const { data, error } = await supabase
           .from("Observations")
           .select(`
             Operation, Etat, Proposition, Solution,
@@ -419,35 +389,68 @@ export default function ResultScreen({ route, navigation }: Props) {
           `)
           .eq("Entrainement_Id", entrainementId);
 
-        rows = Array.isArray(retry.data) ? (retry.data as ObsRow[]) : [];
-        console.log('[ResultScreen] Après retry:', rows.length, 'lignes');
+        if (!alive) return;
+
+        if (error) {
+          console.log("[ResultScreen] Supabase error", error.message);
+          setError("Aucune donnée pour cet entraînement.");
+          setMetrics(null);
+          setSessionScore(null);
+          return;
+        }
+
+        let rows = Array.isArray(data) ? (data as ObsRow[]) : [];
+        console.log('[ResultScreen] Lignes reçues:', rows.length);
+
+        // Si 0 lignes, c'est probablement une race condition → retry
+        if (rows.length === 0 && entrainementId) {
+          console.log('[ResultScreen] 0 lignes détectées, retry dans 1.5s...');
+          await new Promise(r => setTimeout(r, 1500));
+
+          if (!alive) return;
+
+          const retry = await supabase
+            .from("Observations")
+            .select(`
+              Operation, Etat, Proposition, Solution,
+              Temps_Seconds, Marge_Erreur, Score,
+              bonus_vitesse, bonus_marge, score_global
+            `)
+            .eq("Entrainement_Id", entrainementId);
+
+          rows = Array.isArray(retry.data) ? (retry.data as ObsRow[]) : [];
+          console.log('[ResultScreen] Après retry:', rows.length, 'lignes');
+        }
+
+        setMetrics(computeMetrics(rows));
+        // Utiliser null si vraiment 0 lignes (pour activer le fallback)
+        setSessionScore(rows.length > 0 ? sumSessionScore(rows) : null);
+
+        // Count mistakes for the choice modal
+        const faultyCount = rows.filter((r) => !isCorrect(r)).length;
+        setMistakeCount(faultyCount);
+
+        // Score breakdown (nouveau scoring)
+        if (rows.length > 0) {
+          const sumBase = rows.reduce((acc, o) => acc + (toNum(o.Score) ?? 0), 0);
+          const sumVitesse = rows.reduce((acc, o) => acc + (o.bonus_vitesse ?? 0), 0);
+          const sumPrecision = rows.reduce((acc, o) => acc + (o.bonus_marge ?? 0), 0);
+
+          setScoreBreakdown({
+            base: sumBase,
+            vitesse: Math.round(sumVitesse),
+            precision: Math.round(sumPrecision),
+            total: Math.round(sumBase + sumVitesse + sumPrecision),
+          });
+
+          setTimeout(() => setShowScoreModal(true), 500);
+        }
+      } catch (e: any) {
+        console.log('[ResultScreen] Erreur inattendue:', e?.message ?? e);
+        if (alive) setError("Erreur lors du chargement des résultats.");
+      } finally {
+        if (alive) setLoading(false);
       }
-
-      setMetrics(computeMetrics(rows));
-      // Utiliser null si vraiment 0 lignes (pour activer le fallback)
-      setSessionScore(rows.length > 0 ? sumSessionScore(rows) : null);
-
-      // Count mistakes for the choice modal
-      const faultyCount = rows.filter((r) => !isCorrect(r)).length;
-      setMistakeCount(faultyCount);
-
-      // Score breakdown (nouveau scoring)
-      if (rows.length > 0) {
-        const sumBase = rows.reduce((acc, o) => acc + (toNum(o.Score) ?? 0), 0);
-        const sumVitesse = rows.reduce((acc, o) => acc + (o.bonus_vitesse ?? 0), 0);
-        const sumPrecision = rows.reduce((acc, o) => acc + (o.bonus_marge ?? 0), 0);
-
-        setScoreBreakdown({
-          base: sumBase,
-          vitesse: Math.round(sumVitesse),
-          precision: Math.round(sumPrecision),
-          total: Math.round(sumBase + sumVitesse + sumPrecision),
-        });
-
-        setTimeout(() => setShowScoreModal(true), 500);
-      }
-
-      setLoading(false);
     })();
 
     return () => {
